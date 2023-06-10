@@ -1845,7 +1845,7 @@ class OpsDoppler(OpsYlm):
         if xo + ro > -1 or xo - ro < 1:
             chi = ro * (1 - (x - xo) **2 / ro ** 2) ** 0.5
             ul = tt.switch(tt.gt(yo + chi, r), 1, (yo + chi) / r)
-            ll = tt.switch(tt.gt(yo - chi, r), (yo - chi) / r, 1)
+            ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1)
 
             sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
