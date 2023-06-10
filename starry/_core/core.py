@@ -1811,7 +1811,7 @@ class OpsDoppler(OpsYlm):
         return self.xamp / tt.maximum(tt.as_tensor_variable(1.0), vsini)
 
     @autocompile
-    def get_rT(self, x):
+    def get_rT(self, x, xo, yo, ro):
         """The `rho^T` solution vector."""
         deg = self.ydeg + self.udeg
         sijk = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
@@ -1841,6 +1841,45 @@ class OpsDoppler(OpsYlm):
         for i in range(1, deg + 1):
             sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
 
+        #Occultation solutions
+        if xo + ro > -1 or xo - ro < 1:
+            chi = ro * (1 - (x - xo) **2 / ro ** 2) ** 0.5
+            ul = tt.switch(tt.gt(yo + chi, r), 1, (yo + chi) / r)
+            ll = tt.switch(tt.gt(yo - chi, r), (yo - chi) / r, 1)
+
+            sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
+
+            I = tt.zeros(deg + 1, tt.shape(x)[0])
+            I = tt.set_subtensor(
+                I[0], 0.5 * (np.arcsin(ul) - np.arcsin(ll) + (ul * (1 - ul ** 2) ** 0.5 - ll * (1 - ll ** 2) ** 0.5))
+            )
+            I = tt.set_subtensor(
+                I[1], ((1 - ll) ** (3./2.) - (1 - ul) ** (3./2.)) / 3.
+            )
+
+            sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul * r) - (ll * r))
+            sijk_o = tt.set_subtensor(sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2)
+            sijk_o = tt.set_subtensor(sijk_o[0 ,0, 1], I[0] * r2)
+            sijk_o = tt.set_subtensor(sijk_o[0, 1, 1], I[1] * r ** 3.)
+
+            # Upward recursion in j
+            for j in range(2, deg + 1):
+                sijk_o = tt.set_subtensor(
+                    sijk_o[0, j, 0], (1.0 / (j + 1.0)) * ((ul * r) ** (j + 1.0) - (ll * r) ** (j + 1.0))
+                )
+                I = tt.set_subtensor(
+                    I[j], 1./(j + 2.0) * ((j - 1.0) * I[j - 2] - ul ** (j - 1.0) * (1 - ul) ** (3./2.) + ll ** (j - 1.0) * (1 - ll) ** (3./2.))
+                )
+                sijk_o = tt.set_subtensor(
+                    sijk_o[0, j, 1], r ** (j + 2.0) * I[j]
+                )
+        
+            # Upward recursion in i
+            for i in range(1, deg + 1):
+                sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
+
+            sijk = tt.set_subtensor(sijk[:,:,:], sijk[:,:,:] - sijk_o[:,:,:])
+            
         # Full vector
         N = (deg + 1) ** 2
         s = tt.zeros((N, tt.shape(x)[0]))
