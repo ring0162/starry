@@ -1842,7 +1842,7 @@ class OpsDoppler(OpsYlm):
             sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
 
         #Occultation solutions
-        if xo + ro > -1 or xo - ro < 1:
+        if ro != None and xo + ro > -1 or xo - ro < 1:
             chi = ro * (1 - (x - xo) **2 / ro ** 2) ** 0.5
             ul = tt.switch(tt.gt(yo + chi, r), 1, (yo + chi) / r)
             ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1)
