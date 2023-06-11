@@ -1811,7 +1811,7 @@ class OpsDoppler(OpsYlm):
         return self.xamp / tt.maximum(tt.as_tensor_variable(1.0), vsini)
 
     @autocompile
-    def get_rT(self, x, xo, yo, ro):
+    def get_rT(self, x, xo = None, yo = None, ro = None):
         """The `rho^T` solution vector."""
         deg = self.ydeg + self.udeg
         sijk = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
