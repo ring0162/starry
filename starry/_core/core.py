@@ -1848,7 +1848,7 @@ class OpsDoppler(OpsYlm):
 
             # Occultation solutions
             if tt.ge(xmax, -1) or tt.le(xmin, 1):
-                chi = ro * (1 - (x - xo) **2 / ro ** 2) ** 0.5
+                chi = ro * (1 - tt.sqr(x - xo) / tt.sqr(ro)) ** 0.5
                 ul = tt.switch(tt.gt(yo + chi, r), tt.as_tensor_variable(1.0), (yo + chi) / r)
                 ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, tt.as_tensor_variable(-1.0))
 
@@ -1856,10 +1856,10 @@ class OpsDoppler(OpsYlm):
 
                 I = tt.zeros(deg + 1, tt.shape(x)[0])
                 I = tt.set_subtensor(
-                    I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + (ul * (1 - ul ** 2) ** 0.5 - ll * (1 - ll ** 2) ** 0.5))
+                    I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + (ul * (1 - tt.sqr(ul)) ** 0.5 - ll * (1 - tt.sqr(ll) ** 2) ** 0.5))
                 )
                 I = tt.set_subtensor(
-                    I[1], ((1 - ll) ** (3./2.) - (1 - ul) ** (3./2.)) / 3.
+                    I[1], ((1 - ll) ** (3. / 2.) - (1 - ul) ** (3. / 2.)) / 3.
                 )
 
                 sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul * r) - (ll * r))
