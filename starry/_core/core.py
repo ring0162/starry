@@ -1856,7 +1856,7 @@ class OpsDoppler(OpsYlm):
 
                 I = tt.zeros(deg + 1, tt.shape(x)[0])
                 I = tt.set_subtensor(
-                    I[0], 0.5 * (np.arcsin(ul) - np.arcsin(ll) + (ul * (1 - ul ** 2) ** 0.5 - ll * (1 - ll ** 2) ** 0.5))
+                    I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + (ul * (1 - ul ** 2) ** 0.5 - ll * (1 - ll ** 2) ** 0.5))
                 )
                 I = tt.set_subtensor(
                     I[1], ((1 - ll) ** (3./2.) - (1 - ul) ** (3./2.)) / 3.
