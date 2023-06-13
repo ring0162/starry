@@ -1843,9 +1843,11 @@ class OpsDoppler(OpsYlm):
 
         # Check for occultor
         if ro != 0:
+            xmax = xo + ro
+            xmin = xo - ro
 
             # Occultation solutions
-            if xo + ro > -1 or xo - ro < 1:
+            if xmax >= -1 or xmin <= 1:
                 chi = ro * (1 - (x - xo) **2 / ro ** 2) ** 0.5
                 ul = tt.switch(tt.gt(yo + chi, r), 1, (yo + chi) / r)
                 ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1)
