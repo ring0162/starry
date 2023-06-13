@@ -1262,7 +1262,7 @@ class DopplerMap:
 
         return D
 
-    def flux(self, theta=None, normalize=True, method="dotconv"):
+    def flux(self, theta=None, normalize=True, method="dotconv", xo = 0, yo = 0, ro = 0):
         """
         Return the model for the full spectral timeseries.
 
@@ -1287,6 +1287,7 @@ class DopplerMap:
                 instantiating the design matrix and dotting it in. This last
                 method is usually extremely slow and memory intensive; its
                 use is not recommended in general.
+            xo, yo, ro (float, optional): The x, y, and radius of an occultor.
 
         This method returns a matrix of shape (:py:attr:`nt`, :py:attr:`nw`)
         corresponding to the model for the observed spectrum (evaluated on the
@@ -1296,7 +1297,7 @@ class DopplerMap:
         theta = self._get_default_theta(theta)
         if method == "dotconv":
             flux = self.ops.get_flux_from_dotconv(
-                self._inc, theta, self._veq, self._u, self._y, self._spectrum
+                self._inc, theta, self._veq, self._u, self._y, self._spectrum 
             )
         elif method == "convdot":
             flux = self.ops.get_flux_from_convdot(
@@ -1304,7 +1305,7 @@ class DopplerMap:
             )
         elif method == "conv":
             flux = self.ops.get_flux_from_conv(
-                self._inc, theta, self._veq, self._u, self.spectral_map
+                self._inc, theta, self._veq, self._u, self.spectral_map, xo, yo, ro
             )
         elif method == "design":
             flux = self.ops.get_flux_from_design(
