@@ -1842,13 +1842,14 @@ class OpsDoppler(OpsYlm):
             sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
 
         # Check for occultor
-        if tt.neq(ro, 0):
+        if ro != 0:
+
             xmax = xo + ro
             xmin = xo - ro
 
             # Occultation solutions
             if tt.ge(xmax, -1) or tt.le(xmin, 1):
-                chi = ro * (1 - tt.sqr(x - xo) / tt.sqr(ro)) ** 0.5
+                chi = ro * (1 - (x - xo) ** 2 / ro ** 2) ** 0.5
                 ul = tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
                 ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
 
@@ -1856,7 +1857,7 @@ class OpsDoppler(OpsYlm):
 
                 I = tt.zeros((deg + 1, tt.shape(x)[0]))
                 I = tt.set_subtensor(
-                    I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + ul * tt.sqrt(1 - tt.sqr(ul)) - ll * tt.sqrt(1 - tt.sqr(ll)))
+                    I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + ul * (1 - ul ** 2) ** 0.5 - ll * (1 - ll ** 2) ** 0.5)
                 )
                 I = tt.set_subtensor(
                     I[1], ((1 - ll) ** (3. / 2.) - (1 - ul) ** (3. / 2.)) / 3.
@@ -1887,6 +1888,7 @@ class OpsDoppler(OpsYlm):
                 #Subtract occultation solutions from non-occultation solutions
                 sijk = tt.set_subtensor(sijk[:,:,:], sijk[:,:,:] - sijk_o[:,:,:])
             
+        
         # Full vector
         N = (deg + 1) ** 2
         s = tt.zeros((N, tt.shape(x)[0]))
