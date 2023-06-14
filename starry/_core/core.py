@@ -1855,6 +1855,10 @@ class OpsDoppler(OpsYlm):
                 sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
                 I = tt.zeros(deg + 1)
+
+                print(sijk_o)
+                print(I)
+                
                 I = tt.set_subtensor(
                     I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + ul * tt.sqrt(1 - tt.sqr(ul)) - ll * tt.sqrt(1 - tt.sqr(ll)))
                 )
