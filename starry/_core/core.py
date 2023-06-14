@@ -1816,9 +1816,11 @@ class OpsDoppler(OpsYlm):
         deg = self.ydeg + self.udeg
         sijk = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
+        print(x)
         # Initial conditions
         r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
-
+        print(r2)
+        
         # Silly hack to prevent issues with the undefined derivative at x = 1
         # This just computes the square root of r2, zeroing out values very
         # close to zero.
@@ -1843,7 +1845,7 @@ class OpsDoppler(OpsYlm):
 
         # Check for occultor
         if ro != 0:
-
+            print("ro = ", ro)    
             xmax = xo + ro
             xmin = xo - ro
 
