@@ -1294,6 +1294,10 @@ class DopplerMap:
         wavelength grid :py:attr:`wav`) at each of :py:attr:`nt` epochs.
 
         """
+        xo = tt.sharedvar(xo)
+        yo = tt.sharedvar(yo)
+        ro = tt.sharedvar(ro)
+        
         theta = self._get_default_theta(theta)
         if method == "dotconv":
             flux = self.ops.get_flux_from_dotconv(
