@@ -5,7 +5,7 @@ from ._core import OpsDoppler, math
 from ._core.utils import is_tensor, CompileLogMessage
 from ._core.math import nadam
 from ._indices import integers, get_ylm_inds, get_ylmw_inds, get_ul_inds
-from .compat import evaluator, tt
+from .compat import evaluator, tt, theano
 from .maps import YlmBase, MapBase, Map
 from .doppler_visualize import Visualize
 from .doppler_solve import Solve
@@ -1294,10 +1294,10 @@ class DopplerMap:
         wavelength grid :py:attr:`wav`) at each of :py:attr:`nt` epochs.
 
         """
-        xo = tt.sharedvar(xo)
-        yo = tt.sharedvar(yo)
-        ro = tt.sharedvar(ro)
-        
+        xo = theano.shared(xo)
+        yo = theano.shared(yo)
+        ro = theano.shared(ro)
+
         theta = self._get_default_theta(theta)
         if method == "dotconv":
             flux = self.ops.get_flux_from_dotconv(
