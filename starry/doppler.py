@@ -1294,9 +1294,7 @@ class DopplerMap:
         wavelength grid :py:attr:`wav`) at each of :py:attr:`nt` epochs.
 
         """
-        xo = theano.shared(xo)
-        yo = theano.shared(yo)
-        ro = theano.shared(ro)
+        xo, yo, ro = self._math.vectorize(xo, yo, ro)
 
         theta = self._get_default_theta(theta)
         if method == "dotconv":
