@@ -1816,15 +1816,11 @@ class OpsDoppler(OpsYlm):
         deg = self.ydeg + self.udeg
         sijk = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
-        #print(x.eval())
-
         # Initial conditions
         r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
         xo = xo * tt.ones_like(x)
         yo = yo * tt.ones_like(x)
         ro = ro * tt.ones_like(x)
-
-        #print(r2.eval())
 
         # Silly hack to prevent issues with the undefined derivative at x = 1
         # This just computes the square root of r2, zeroing out values very
@@ -1848,10 +1844,12 @@ class OpsDoppler(OpsYlm):
         for i in range(1, deg + 1):
             sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
 
+        # Limits for occultation
         chi = tt.maximum((ro ** 2 - (x - xo) ** 2) ** 0.5, tt.zeros_like(x))
         ul = tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
         ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
 
+        # Boundary conditions for occultation
         sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
         I = tt.zeros((deg + 1, tt.shape(x)[0]))
