@@ -1818,9 +1818,9 @@ class OpsDoppler(OpsYlm):
 
         # Initial conditions
         r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
-        xo = tt.maximum(xo * tt.ones_like(x), tt.zeros_like(x))
-        yo = tt.maximum(yo * tt.ones_like(x), tt.zeros_like(x))
-        ro = tt.maximum(ro * tt.ones_like(x), tt.zeros_like(x))
+        xo = xo * tt.ones_like(x)
+        yo = yo * tt.ones_like(x)
+        ro = ro * tt.ones_like(x)
 
         # Silly hack to prevent issues with the undefined derivative at x = 1
         # This just computes the square root of r2, zeroing out values very
@@ -1845,7 +1845,7 @@ class OpsDoppler(OpsYlm):
             sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
 
         # Limits for occultation
-        chi = tt.maximum((ro ** 2 - (x - xo) ** 2) ** 0.5, tt.zeros_like(x))
+        chi = tt.maximum((ro ** 2 - (x - xo) ** 2), tt.zeros_like(x) + 1e-100) ** 0.5
         ul = tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
         ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
 
@@ -1885,8 +1885,8 @@ class OpsDoppler(OpsYlm):
             sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
 
         #Subtract occultation solutions from non-occultation solutions
-        #sijk = tt.set_subtensor(sijk, sijk[0:3] - sijk_o[0:3])
-        sijk = sijk_o    
+        sijk = tt.set_subtensor(sijk, sijk[:,:,:] - sijk_o[:,:,:])
+        #sijk = sijk_o    
         
         # Full vector
         N = (deg + 1) ** 2
