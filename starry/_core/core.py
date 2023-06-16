@@ -1820,6 +1820,10 @@ class OpsDoppler(OpsYlm):
 
         # Initial conditions
         r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
+        xo = xo * tt.ones_like(x)
+        yo = yo * tt.ones_like(x)
+        ro = ro * tt.ones_like(x)
+
         #print(r2.eval())
 
         # Silly hack to prevent issues with the undefined derivative at x = 1
@@ -1851,8 +1855,8 @@ class OpsDoppler(OpsYlm):
             xmin = xo - ro
 
             # Occultation solutions
-            if tt.ge(xmax, -1) or tt.le(xmin, 1):
-                chi = ro * (1 - (x - xo) ** 2 / ro ** 2) ** 0.5
+            if tt.ge(xmax[0], -1) or tt.le(xmin[0], 1):
+                chi = (ro ** 2 - (x - xo) ** 2) ** 0.5
                 ul = tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
                 ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
 
