@@ -1848,52 +1848,44 @@ class OpsDoppler(OpsYlm):
         for i in range(1, deg + 1):
             sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
 
-        # Check for occultor
-        if tt.neq(ro, 0):
-            #print("ro = ", ro.eval())    
-            xmax = xo + ro
-            xmin = xo - ro
+        chi = tt.maximum((ro ** 2 - (x - xo) ** 2) ** 0.5, tt.zeros_like(x))
+        ul = tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
+        ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
 
-            # Occultation solutions
-            if tt.ge(xmax[0], -1) or tt.le(xmin[0], 1):
-                chi = (ro ** 2 - (x - xo) ** 2) ** 0.5
-                ul = tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
-                ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
+        sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
-                sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
+        I = tt.zeros((deg + 1, tt.shape(x)[0]))
+        I = tt.set_subtensor(
+            I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + ul * (1 - ul ** 2) ** 0.5 - ll * (1 - ll ** 2) ** 0.5)
+        )
+        I = tt.set_subtensor(
+            I[1], ((1 - ll) ** (3. / 2.) - (1 - ul) ** (3. / 2.)) / 3.
+        )
 
-                I = tt.zeros((deg + 1, tt.shape(x)[0]))
-                I = tt.set_subtensor(
-                    I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + ul * (1 - ul ** 2) ** 0.5 - ll * (1 - ll ** 2) ** 0.5)
-                )
-                I = tt.set_subtensor(
-                    I[1], ((1 - ll) ** (3. / 2.) - (1 - ul) ** (3. / 2.)) / 3.
-                )
+        sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul * r) - (ll * r))
+        sijk_o = tt.set_subtensor(sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2)
+        sijk_o = tt.set_subtensor(sijk_o[0 ,0, 1], I[0] * r2)
+        sijk_o = tt.set_subtensor(sijk_o[0, 1, 1], I[1] * r ** 3.)
 
-                sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul * r) - (ll * r))
-                sijk_o = tt.set_subtensor(sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2)
-                sijk_o = tt.set_subtensor(sijk_o[0 ,0, 1], I[0] * r2)
-                sijk_o = tt.set_subtensor(sijk_o[0, 1, 1], I[1] * r ** 3.)
-
-                # Upward recursion in j
-                for j in range(2, deg + 1):
-                    sijk_o = tt.set_subtensor(
-                        sijk_o[0, j, 0], (1.0 / (j + 1.0)) * ((ul * r) ** (j + 1.0) - (ll * r) ** (j + 1.0))
-                    )
-                    I = tt.set_subtensor(
-                        I[j], 
-                        1./(j + 2.0) * ((j - 1.0) * I[j - 2] - ul ** (j - 1.0) * (1 - ul) ** (3./2.) + ll ** (j - 1.0) * (1 - ll) ** (3./2.))
-                    )
-                    sijk_o = tt.set_subtensor(
-                        sijk_o[0, j, 1], r ** (j + 2.0) * I[j]
-                    )
+        # Upward recursion in j
+        for j in range(2, deg + 1):
+            sijk_o = tt.set_subtensor(
+                sijk_o[0, j, 0], (1.0 / (j + 1.0)) * ((ul * r) ** (j + 1.0) - (ll * r) ** (j + 1.0))
+            )
+            I = tt.set_subtensor(
+                I[j], 
+                1./(j + 2.0) * ((j - 1.0) * I[j - 2] - ul ** (j - 1.0) * (1 - ul) ** (3./2.) + ll ** (j - 1.0) * (1 - ll) ** (3./2.))
+            )
+            sijk_o = tt.set_subtensor(
+                sijk_o[0, j, 1], r ** (j + 2.0) * I[j]
+            )
         
-                # Upward recursion in i
-                for i in range(1, deg + 1):
-                    sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
+        # Upward recursion in i
+        for i in range(1, deg + 1):
+            sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
 
-                #Subtract occultation solutions from non-occultation solutions
-                sijk = tt.set_subtensor(sijk[:,:,:], sijk[:,:,:] - sijk_o[:,:,:])
+        #Subtract occultation solutions from non-occultation solutions
+        sijk = tt.set_subtensor(sijk[:,:,:], sijk[:,:,:] - sijk_o[:,:,:])
             
         
         # Full vector
