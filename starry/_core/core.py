@@ -1860,6 +1860,8 @@ class OpsDoppler(OpsYlm):
             I[1], ((1 - ll) ** (3 / 2) - (1 - ul) ** (3 / 2)) / 3
         )
 
+        print("Hello!")
+        
         sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul * r) - (ll * r))
         sijk_o = tt.set_subtensor(sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2)
         sijk_o = tt.set_subtensor(sijk_o[0 ,0, 1], I[0] * r2)
