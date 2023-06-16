@@ -1861,7 +1861,7 @@ class OpsDoppler(OpsYlm):
         )
 
         print("Hello!")
-        
+
         sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul * r) - (ll * r))
         sijk_o = tt.set_subtensor(sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2)
         sijk_o = tt.set_subtensor(sijk_o[0 ,0, 1], I[0] * r2)
@@ -1885,7 +1885,7 @@ class OpsDoppler(OpsYlm):
             sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
 
         #Subtract occultation solutions from non-occultation solutions
-        #sijk = tt.set_subtensor(sijk, sijk[:,:,:] - sijk_o[:,:,:])
+        sijk = tt.set_subtensor(sijk, sijk[0:3] - sijk_o[0:3])
         #sijk = sijk - sijk_o    
         
         # Full vector
