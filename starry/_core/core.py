@@ -1885,8 +1885,7 @@ class OpsDoppler(OpsYlm):
             sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
 
         #Subtract occultation solutions from non-occultation solutions
-        sijk = tt.set_subtensor(sijk[:,:,:], sijk[:,:,:] - sijk_o[:,:,:])
-        #sijk = sijk_o    
+        sijk = sijk - sijk_o   
         
         # Full vector
         N = (deg + 1) ** 2
