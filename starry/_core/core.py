@@ -1842,7 +1842,19 @@ class OpsDoppler(OpsYlm):
 
         # Upward recursion in i
         for i in range(1, deg + 1):
-            sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
+            sijk = tt.set_subtensor(sijk[i, 0, 0], sijk[i - 1, 0, 0] * x)
+            sijk = tt.set_subtensor(sijk[i, 0, 1], sijk[i - 1, 0, 1] * x)
+            sijk = tt.set_subtensor(sijk[i, 1, 0], sijk[i - 1, 1, 0] * x)
+            sijk = tt.set_subtensor(sijk[i, 1, 1], sijk[i - 1, 1, 1] * x)
+
+            # Upward recursion in j
+            for j in range(2, deg + 1):
+                sijk = tt.set_subtensor(
+                    sijk[i, j, 0], sijk[i - 1, j, 0] * x
+                )
+                sijk = tt.set_subtensor(
+                    sijk[i, j, 1], sijk[i - 1, j, 1] * x
+                )
 
         # Limits for occultation
         chi = tt.maximum((ro ** 2 - (x - xo) ** 2), tt.zeros_like(x) + 1e-100) ** 0.5
@@ -1860,8 +1872,6 @@ class OpsDoppler(OpsYlm):
             I[1], ((1 - ll) ** (3 / 2) - (1 - ul) ** (3 / 2)) / 3
         )
 
-        print("Hello!")
-
         sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul * r) - (ll * r))
         sijk_o = tt.set_subtensor(sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2)
         sijk_o = tt.set_subtensor(sijk_o[0 ,0, 1], I[0] * r2)
@@ -1874,7 +1884,7 @@ class OpsDoppler(OpsYlm):
             )
             I = tt.set_subtensor(
                 I[j], 
-                1./(j + 2.0) * ((j - 1.0) * I[j - 2] - ul ** (j - 1.0) * (1 - ul) ** (3./2.) + ll ** (j - 1.0) * (1 - ll) ** (3./2.))
+                1./(j + 2.0) * ((j - 1.0) * I[j - 2] - ul ** (j - 1.0) * (1 - ul) ** (3/2) + ll ** (j - 1.0) * (1 - ll) ** (3/2))
             )
             sijk_o = tt.set_subtensor(
                 sijk_o[0, j, 1], r ** (j + 2.0) * I[j]
@@ -1882,10 +1892,24 @@ class OpsDoppler(OpsYlm):
         
         # Upward recursion in i
         for i in range(1, deg + 1):
-            sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
+            sijk_o = tt.set_subtensor(sijk_o[i, 0, 0], sijk_o[i - 1, 0, 0] * x)
+            sijk_o = tt.set_subtensor(sijk_o[i, 0, 1], sijk_o[i - 1, 0, 1] * x)
+            sijk_o = tt.set_subtensor(sijk_o[i, 1, 0], sijk_o[i - 1, 1, 0] * x)
+            sijk_o = tt.set_subtensor(sijk_o[i, 1, 1], sijk_o[i - 1, 1, 1] * x)
+            for j in range(2, deg + 1):
+                sijk_o = tt.set_subtensor(
+                    sijk_o[i, j, 0], sijk_o[i - 1, j, 0] * x
+                )
+                sijk_o = tt.set_subtensor(
+                    sijk_o[i, j, 1], sijk_o[i - 1, j, 1] * x
+                )
 
-        #Subtract occultation solutions from non-occultation solutions
-        sijk = sijk - sijk_o   
+        #Subtract sijk_o from sijk element by element using set_subtensor
+        for i in range(0, deg + 1):
+            for j in range(0, deg + 1):
+                sijk = tt.set_subtensor(sijk[i, j, 0], sijk[i, j, 0] - sijk_o[i, j, 0])
+                sijk = tt.set_subtensor(sijk[i, j, 1], sijk[i, j, 1] - sijk_o[i, j, 1])
+
         
         # Full vector
         N = (deg + 1) ** 2
