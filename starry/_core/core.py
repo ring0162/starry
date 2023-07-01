@@ -1858,9 +1858,21 @@ class OpsDoppler(OpsYlm):
 
         # Limits for occultation
         chi = tt.maximum((ro ** 2 - (x - xo) ** 2), tt.zeros_like(x) + 1e-100) ** 0.5
-        ul = tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
-        ll = tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
 
+        ul = tt.switch(
+            tt.gt(xo - ro, x), 0, 
+            tt.switch(tt.gt(x, xo + ro), 0,
+            tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
+            )
+        )
+
+        ll = tt.switch(
+            tt.gt(xo - ro, x), 0,
+            tt.switch(tt.gt(x, xo + ro), 0,
+            tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
+            )
+        )
+    
         # Boundary conditions for occultation
         sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
