@@ -1981,20 +1981,24 @@ class OpsDoppler(OpsYlm):
         # Compute the convolution kernels
         vsini = self.enforce_bounds(veq * tt.sin(inc), 0.0, self.vsini_max)
         x = self.get_x(vsini)
-        rT = self.get_rT(x, xo, yo, ro)
-        kT0 = self.get_kT0(rT)
-
-        # Compute the limb darkening operator
-        if self.udeg > 0:
-            F = self.F(
-                tt.as_tensor_variable(u), tt.as_tensor_variable([np.pi])
-            )
-            L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
-            kT0 = tt.dot(tt.transpose(L), kT0)
 
         # Compute the kernels at each epoch
         kT = tt.zeros((self.nt, self.Ny, self.nk))
         for m in range(self.nt):
+
+            #Begin section moved into epoch loop to calculate kT0 for each occulter position    
+            rT = self.get_rT(x, xo[m], yo, ro)
+            kT0 = self.get_kT0(rT)
+
+            # Compute the limb darkening operator
+            if self.udeg > 0:
+                F = self.F(
+                    tt.as_tensor_variable(u), tt.as_tensor_variable([np.pi])
+                )
+                L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
+                kT0 = tt.dot(tt.transpose(L), kT0)
+
+            #End moved section.
             kT = tt.set_subtensor(
                 kT[m],
                 tt.transpose(
