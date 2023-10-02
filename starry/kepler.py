@@ -3,6 +3,7 @@ from . import config
 from ._constants import *
 from .maps import MapBase, RVBase, ReflectedBase
 from ._core import OpsSystem, math
+from .doppler import DopplerMap
 from .compat import evaluator
 import numpy as np
 from astropy import units
@@ -122,9 +123,9 @@ class Body(object):
 
     @map.setter
     def map(self, value):
-        assert MapBase in getmro(
+        assert MapBase or DopplerMap in getmro(
             type(value)
-        ), "The `map` attribute must be a `starry` map instance."
+        ), "The `map` attribute must be a `starry` map or DopplerMap instance."
         assert (
             value._lazy == self._lazy
         ), "Map must have the same evaluation mode (lazy/greedy)."
@@ -411,12 +412,15 @@ class System(object):
             (equivalent to the "resampling" procedure suggested by Kipping 2010),
             ``1`` for the trapezoid rule, or ``2`` for Simpson’s rule.
     """
+    ###AR bypass to try to incorporate Doppler maps
 
     def _no_spectral(self):
         if self._primary._map.nw is not None:  # pragma: no cover
             raise NotImplementedError(
                 "Method not yet implemented for spectral maps."
             )
+
+    ###end AR bypass
 
     def __init__(
         self,
@@ -445,12 +449,24 @@ class System(object):
         assert (
             type(primary) is Primary
         ), "Argument `primary` must be an instance of `Primary`."
-        assert (
-            primary._map.__props__["reflected"] == False
-        ), "Reflected light map not allowed for the primary body."
+
+        ###AR bypassing types of maps to incorporate DopplerMaps
+
+
         self._primary = primary
-        self._rv = primary._map.__props__["rv"]
-        self._oblate = primary._map.__props__["oblate"]
+        if type(primary._map) is MapBase:
+            assert (
+                primary._map.__props__["reflected"] == False
+            ), "Reflected light map not allowed for the primary body."
+            self._rv = primary._map.__props__["rv"]
+            self._oblate = primary._map.__props__["oblate"]
+        else:
+            self._reflected = False
+            self._rv = False
+            self._oblate = False
+
+        ###AR end bypassing 
+
         self._lazy = primary._lazy
         self._math = primary._math
         if self._lazy:
@@ -465,30 +481,40 @@ class System(object):
                 "Argument `*secondaries` must be a sequence of "
                 "`Secondary` instances."
             )
+
             assert (
                 sec._map.nw == self._primary._map.nw
             ), "All bodies must have the same number of wavelength bins `nw`."
-            assert sec._map.__props__["rv"] == self._rv, (
-                "Radial velocity must be enabled "
-                "for either all or none of the bodies."
-            )
+
+            ###AR bypassing types of maps to incorporate DopplerMaps
+            if type(self._primary._map) is MapBase:
+                assert sec._map.__props__["rv"] == self._rv, (
+                    "Radial velocity must be enabled "
+                    "for either all or none of the bodies."
+                )
+            ###AR end bypassing
+
             assert (
                 sec._lazy == self._lazy
             ), "All bodies must have the same evaluation mode (lazy/greedy)."
-            assert not sec._map.__props__[
-                "oblate"
-            ], "Oblate secondary bodies are not currently supported."
 
-        reflected = [sec._map.__props__["reflected"] for sec in secondaries]
-        if np.all(reflected):
-            self._reflected = True
-        elif np.any(reflected):
-            raise ValueError(
-                "Reflected light must be enabled "
-                "for either all or none of the secondaries."
-            )
-        else:
-            self._reflected = False
+            ###AR bypassing types of maps to incorporate DopplerMaps
+            if type(self._primary._map) is MapBase:
+                assert not sec._map.__props__[
+                    "oblate"
+                ], "Oblate secondary bodies are not currently supported."
+
+        if type(self._primary._map) is MapBase:
+            reflected = [sec._map.__props__["reflected"] for sec in secondaries]
+            if np.all(reflected):
+                self._reflected = True
+            elif np.any(reflected):
+                raise ValueError(
+                    "Reflected light must be enabled "
+                    "for either all or none of the secondaries."
+                )
+            else:
+                self._reflected = False
         self._secondaries = secondaries
 
         # All bodies
@@ -911,6 +937,7 @@ class System(object):
             t (scalar or vector): An array of times at which to evaluate
                 the design matrix in units of :py:attr:`time_unit`.
         """
+
         return self.ops.X(
             self._math.reshape(self._math.to_array_or_tensor(t), [-1])
             * self._time_factor,
@@ -1012,68 +1039,80 @@ class System(object):
                 True. If False, returns arrays corresponding to the flux
                 from each body.
         """
-        X = self.design_matrix(t)
+        if type(self.primary.map) == DopplerMap:
+            xpos, ypos, zpos = self.position(t)
+            theta = np.linspace(0, 2 * np.pi, int(self.primary.map.nt))
+            for body in self.secondaries:
+                #assign the radius of each body to a variable
+                r = body._r * np.ones_like(t)
+                r = self._math.cast(r)
+            xpos = self._math.cast(xpos[1])
+            ypos = self._math.cast(ypos[1])
+            return DopplerMap.flux(self.primary.map, theta = theta, method = "conv", normalize=False, xo = xpos, yo = ypos, ro = r)
+        else:
+            X = self.design_matrix(t)
+            # Weight the ylms by amplitude
+            if self._reflected:
+                # If we're doing reflected light, scale the amplitude of
+                # each of the secondaries by the amplitude of the primary
+                # (the illumination source).
+                ay = [self._primary.map.amp * self._primary._map._y] + [
+                    self._primary.map.amp * body.map.amp * body._map._y
+                    for body in self._secondaries
+                ]
+            elif self._oblate and self.primary.map.nw is not None:
+                # The problem is not strictly linear, since the design matrix
+                # is now 3D (time, ylm index, wavelength). So we pre-weight
+                # the spherical harmonic vector by the filter at each wavelength
+                # to get a matrix (ylm index, wavelength), to which we can apply
+                # the design matrix (time, ylm index) to get the spectral
+                # light curve out.
+                if self._primary.map.ydeg == 0:
+                    y = self._primary.map._f
+                else:
+                    y = self._primary.map.ops.weight_ylms_by_grav_dark_filter(
+                        self._primary.map.y, self._primary.map._f
+                    )
+                ay = [self._primary.map.amp * y] + [
+                    body.map.amp * body._map._y for body in self._secondaries
+                ]
 
-        # Weight the ylms by amplitude
-        if self._reflected:
-            # If we're doing reflected light, scale the amplitude of
-            # each of the secondaries by the amplitude of the primary
-            # (the illumination source).
-            ay = [self._primary.map.amp * self._primary._map._y] + [
-                self._primary.map.amp * body.map.amp * body._map._y
-                for body in self._secondaries
-            ]
-        elif self._oblate and self.primary.map.nw is not None:
-            # The problem is not strictly linear, since the design matrix
-            # is now 3D (time, ylm index, wavelength). So we pre-weight
-            # the spherical harmonic vector by the filter at each wavelength
-            # to get a matrix (ylm index, wavelength), to which we can apply
-            # the design matrix (time, ylm index) to get the spectral
-            # light curve out.
-            if self._primary.map.ydeg == 0:
-                y = self._primary.map._f
             else:
-                y = self._primary.map.ops.weight_ylms_by_grav_dark_filter(
-                    self._primary.map.y, self._primary.map._f
-                )
-            ay = [self._primary.map.amp * y] + [
-                body.map.amp * body._map._y for body in self._secondaries
-            ]
+                ay = [body.map.amp * body._map._y for body in self._bodies]
 
-        else:
-            ay = [body.map.amp * body._map._y for body in self._bodies]
 
-        if total:
-            ay = self._math.concatenate(ay)
-            if integrated and self.primary.map.nw is not None:
-                ay = self._math.sum(ay, axis=1)
-            return self._math.dot(X, ay)
-        else:
-            if self._oblate:
+            if total:
+                ay = self._math.concatenate(ay)
+                if integrated and self.primary.map.nw is not None:
+                    ay = self._math.sum(ay, axis=1)
+                return self._math.dot(X, ay)
+            else:
+                if self._oblate:
                 # Because of our weighting hack above, the indices of
                 # the primary's coefficients in X changed, so let's
                 # re-compute all indices
-                Npri = (
+                    Npri = (
                     self._primary._map.ydeg + self._primary._map.fdeg + 1
-                ) ** 2
-                Ny = [Npri] + [sec._map.Ny for sec in self._secondaries]
-                inds = []
-                cur = 0
-                for N in Ny:
-                    inds.append(cur + np.arange(N))
-                    cur += N
-            else:
-                inds = self._inds
-            if integrated and self.primary.map.nw is not None:
-                return [
-                    self._math.dot(X[:, idx], self._math.sum(ay[i], axis=1))
-                    for i, idx in enumerate(inds)
-                ]
-            else:
-                return [
-                    self._math.dot(X[:, idx], ay[i])
-                    for i, idx in enumerate(inds)
-                ]
+                    ) ** 2
+                    Ny = [Npri] + [sec._map.Ny for sec in self._secondaries]
+                    inds = []
+                    cur = 0
+                    for N in Ny:
+                        inds.append(cur + np.arange(N))
+                        cur += N
+                else:
+                    inds = self._inds
+                if integrated and self.primary.map.nw is not None:
+                    return [
+                        self._math.dot(X[:, idx], self._math.sum(ay[i], axis=1))
+                        for i, idx in enumerate(inds)
+                    ]
+                else:
+                    return [
+                        self._math.dot(X[:, idx], ay[i])
+                        for i, idx in enumerate(inds)
+                    ]
+
 
     def rv(self, t, keplerian=True, total=True):
         """Compute the observed radial velocity of the system at times ``t``.
