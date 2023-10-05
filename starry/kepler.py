@@ -1042,12 +1042,10 @@ class System(object):
         if type(self.primary.map) == DopplerMap:
             xpos, ypos, zpos = self.position(t)
             theta = np.linspace(0, 2 * np.pi, int(self.primary.map.nt))
+            theta = self._math.cast(theta)
             for body in self.secondaries:
                 #assign the radius of each body to a variable
                 r = body._r * np.ones_like(t)
-                r = self._math.cast(r)
-            xpos = self._math.cast(xpos[1])
-            ypos = self._math.cast(ypos[1])
             return DopplerMap.flux(self.primary.map, theta = theta, method = "conv", normalize=False, xo = xpos, yo = ypos, ro = r)
         else:
             X = self.design_matrix(t)

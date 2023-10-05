@@ -1297,6 +1297,7 @@ class DopplerMap:
         xo, yo, ro = self._math.cast(xo, yo, ro)
 
         theta = self._get_default_theta(theta)
+
         if method == "dotconv":
             flux = self.ops.get_flux_from_dotconv(
                 self._inc, theta, self._veq, self._u, self._y, self._spectrum 
