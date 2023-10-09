@@ -1041,8 +1041,9 @@ class System(object):
         """
         if type(self.primary.map) == DopplerMap:
             xpos, ypos, zpos = self.position(t)
+            xpos = xpos[1]
+            ypos = ypos[1]
             theta = np.linspace(0, 2 * np.pi, int(self.primary.map.nt))
-            theta = self._math.cast(theta)
             for body in self.secondaries:
                 #assign the radius of each body to a variable
                 r = body._r * np.ones_like(t)
