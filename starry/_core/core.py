@@ -1987,7 +1987,7 @@ class OpsDoppler(OpsYlm):
         for m in range(self.nt):
 
             #Begin section moved into epoch loop to calculate kT0 for each occulter position    
-            rT = self.get_rT(x, xo[m], yo, ro)
+            rT = self.get_rT(x, xo[m], yo[m], ro[m])
             kT0 = self.get_kT0(rT)
 
             # Compute the limb darkening operator
