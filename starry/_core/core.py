@@ -1810,17 +1810,15 @@ class OpsDoppler(OpsYlm):
         # Prevent division by zero: min vsini is 1 m/s
         return self.xamp / tt.maximum(tt.as_tensor_variable(1.0), vsini)
 
+
     @autocompile
-    def get_rT(self, x, xo, yo, ro):
-        """The `rho^T` solution vector."""
+    def get_sijk(self, x):
+        """The `s` solution vector."""
         deg = self.ydeg + self.udeg
         sijk = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
         # Initial conditions
         r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
-        xo = xo * tt.ones_like(x)
-        yo = yo * tt.ones_like(x)
-        ro = ro * tt.ones_like(x)
 
         # Silly hack to prevent issues with the undefined derivative at x = 1
         # This just computes the square root of r2, zeroing out values very
@@ -1855,6 +1853,27 @@ class OpsDoppler(OpsYlm):
                 sijk = tt.set_subtensor(
                     sijk[i, j, 1], sijk[i - 1, j, 1] * x
                 )
+        
+        return sijk
+    
+    @autocompile
+    def sijk_occultation(self, x, xo, yo, ro):
+        '''The `s` solution vector for occultation.'''
+        sijk = self.get_sijk(x)
+
+        deg = self.ydeg + self.udeg
+
+        # Initial conditions
+        r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
+        xo = xo * tt.ones_like(x)
+        yo = yo * tt.ones_like(x)
+        ro = ro * tt.ones_like(x)
+
+        # Silly hack to prevent issues with the undefined derivative at x = 1
+        # This just computes the square root of r2, zeroing out values very
+        # close to zero.
+        r = tt.maximum(1 - x ** 2, tt.zeros_like(x) + 1e-100) ** 0.5
+        r = tt.switch(tt.gt(r, 1e-49), r, tt.zeros_like(r))
 
         # Limits for occultation
         chi = tt.maximum((ro ** 2 - (x - xo) ** 2), tt.zeros_like(x) + 1e-100) ** 0.5
@@ -1872,7 +1891,7 @@ class OpsDoppler(OpsYlm):
             tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
             )
         )
-    
+
         # Boundary conditions for occultation
         sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
@@ -1917,12 +1936,37 @@ class OpsDoppler(OpsYlm):
                 )
 
         #Subtract sijk_o from sijk element by element using set_subtensor
-        for i in range(0, deg + 1):
-            for j in range(0, deg + 1):
-                sijk = tt.set_subtensor(sijk[i, j, 0], sijk[i, j, 0] - sijk_o[i, j, 0])
-                sijk = tt.set_subtensor(sijk[i, j, 1], sijk[i, j, 1] - sijk_o[i, j, 1])
+        # for i in range(0, deg + 1):
+        #     for j in range(0, deg + 1):
+        #         sijk = tt.set_subtensor(sijk[i, j, 0], sijk[i, j, 0] - sijk_o[i, j, 0])
+        #         sijk = tt.set_subtensor(sijk[i, j, 1], sijk[i, j, 1] - sijk_o[i, j, 1])
 
-        
+        sijk = sijk - sijk_o
+
+        return sijk
+
+    @autocompile
+    def get_rT(self, x):
+        """The `rho^T` solution vector."""
+        sijk = self.get_sijk(x)
+        deg = self.ydeg + self.udeg
+        # Full vector
+        N = (deg + 1) ** 2
+        s = tt.zeros((N, tt.shape(x)[0]))
+        n = np.arange(N)
+        LAM = np.floor(np.sqrt(n))
+        DEL = 0.5 * (n - LAM ** 2)
+        i = np.array(np.floor(LAM - DEL), dtype=int)
+        j = np.array(np.floor(DEL), dtype=int)
+        k = np.array(np.ceil(DEL) - np.floor(DEL), dtype=int)
+        s = tt.set_subtensor(s[n], sijk[i, j, k])
+        return s
+    
+    @autocompile
+    def get_rT_occult(self, x, xo, yo, ro):
+        """The `rho^T` solution vector."""
+        sijk = self.sijk_occultation(x, xo, yo, ro)
+        deg = self.ydeg + self.udeg
         # Full vector
         N = (deg + 1) ** 2
         s = tt.zeros((N, tt.shape(x)[0]))
@@ -1973,7 +2017,43 @@ class OpsDoppler(OpsYlm):
         return ts.DenseFromSparse()(A)
 
     @autocompile
-    def get_kT(self, inc, theta, veq, u, xo, yo, ro):
+    def get_kT(self, inc, theta, veq, u):
+        """
+        Get the kernels at an array of angular phases `theta`.
+
+        """
+        # Compute the convolution kernels
+        vsini = self.enforce_bounds(veq * tt.sin(inc), 0.0, self.vsini_max)
+        x = self.get_x(vsini)
+        rT = self.get_rT(x)
+        kT0 = self.get_kT0(rT)
+
+        # Compute the limb darkening operator
+        if self.udeg > 0:
+            F = self.F(
+                tt.as_tensor_variable(u), tt.as_tensor_variable([np.pi])
+            )
+            L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
+            kT0 = tt.dot(tt.transpose(L), kT0)
+
+        # Compute the kernels at each epoch
+        kT = tt.zeros((self.nt, self.Ny, self.nk))
+        for m in range(self.nt):
+            kT = tt.set_subtensor(
+                kT[m],
+                tt.transpose(
+                    self.right_project(
+                        tt.transpose(kT0),
+                        inc,
+                        tt.as_tensor_variable(0.0),
+                        theta[m],
+                    )
+                ),
+            )
+        return kT
+
+    @autocompile
+    def get_kT_occult(self, inc, theta, veq, u, xo, yo, ro):
         """
         Get the kernels at an array of angular phases `theta`.
 
@@ -1986,8 +2066,8 @@ class OpsDoppler(OpsYlm):
         kT = tt.zeros((self.nt, self.Ny, self.nk))
         for m in range(self.nt):
 
-            #Begin section moved into epoch loop to calculate kT0 for each occulter position    
-            rT = self.get_rT(x, xo[m], yo[m], ro[m])
+            #Begin section moved into epoch loop to calculate kT0 for each occulter position        
+            rT = self.get_rT_occult(x, xo[m], yo[m], ro[m])
             kT0 = self.get_kT0(rT)
 
             # Compute the limb darkening operator
@@ -2011,7 +2091,7 @@ class OpsDoppler(OpsYlm):
                 ),
             )
         return kT
-
+    
     @autocompile
     def get_D_data(self, kT0, inc, theta_scalar):
         """

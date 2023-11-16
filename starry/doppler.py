@@ -1294,31 +1294,68 @@ class DopplerMap:
         wavelength grid :py:attr:`wav`) at each of :py:attr:`nt` epochs.
 
         """
-        xo, yo, ro = self._math.cast(xo, yo, ro)
+        occult = False
+        if type(ro) == float:
+            if ro != 0:
+                occult = True
+                ro = ro * tt.ones(self.nt)
+                if type(xo) == float:
+                    xo = xo * tt.ones(self.nt)
+                elif len(xo) != self.nt:
+                    raise ValueError(
+                        "The number of occultation positions must be either 1 or  "
+                        "equal to the number of epochs. "
+                    )
+                else:
+                    xo = self._math.cast(xo)
+                if type(yo) == float:
+                    yo = yo * tt.ones(self.nt)
+                elif len(yo) != self.nt:
+                    raise ValueError(
+                        "The number of occultation positions must be either 1 or  "
+                        "equal to the number of epochs. "
+                    )
+                else:
+                    yo = self._math.cast(yo)
+        elif ro.any() != 0:
+            occult = True
+            if len(xo) != self.nt or len(yo) != self.nt or len(ro) != self.nt:
+                raise ValueError(
+                    "The number of occultation positions must be either 1 or  "
+                    "equal to the number of epochs. "
+                )
+            else:
+                xo, yo, ro = self._math.cast(xo, yo, ro)
+   
 
         theta = self._get_default_theta(theta)
 
-        if method == "dotconv":
-            flux = self.ops.get_flux_from_dotconv(
-                self._inc, theta, self._veq, self._u, self._y, self._spectrum 
-            )
-        elif method == "convdot":
-            flux = self.ops.get_flux_from_convdot(
-                self._inc, theta, self._veq, self._u, self._y, self._spectrum
-            )
-        elif method == "conv":
-            flux = self.ops.get_flux_from_conv(
+        if occult:
+            flux = self.ops.get_flux_from_conv_occult(
                 self._inc, theta, self._veq, self._u, self.spectral_map, xo, yo, ro
             )
-        elif method == "design":
-            flux = self.ops.get_flux_from_design(
-                self._inc, theta, self._veq, self._u, self.spectral_map
-            )
         else:
-            raise ValueError(
-                "Keyword ``method`` must be one of ``dotconv``, "
-                "``convdot``, ``conv``, or ``design``."
-            )
+            if method == "dotconv":
+                flux = self.ops.get_flux_from_dotconv(
+                    self._inc, theta, self._veq, self._u, self._y, self._spectrum 
+                )
+            elif method == "convdot":
+                flux = self.ops.get_flux_from_convdot(
+                    self._inc, theta, self._veq, self._u, self._y, self._spectrum
+                )
+            elif method == "conv":
+                flux = self.ops.get_flux_from_conv(
+                    self._inc, theta, self._veq, self._u, self.spectral_map
+                )
+            elif method == "design":
+                flux = self.ops.get_flux_from_design(
+                    self._inc, theta, self._veq, self._u, self.spectral_map
+                )
+            else:
+                raise ValueError(
+                    "Keyword ``method`` must be one of ``dotconv``, "
+                    "``convdot``, ``conv``, or ``design``."
+                )
 
         # Interpolate to the output grid
         if self._interp:
