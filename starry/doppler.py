@@ -1319,14 +1319,14 @@ class DopplerMap:
                     yo = self._math.cast(yo)
         elif ro.any() != 0:
             occult = True
-            if len(xo) != self.nt or len(yo) != self.nt or len(ro) != self.nt:
-                raise ValueError(
-                    "The number of occultation positions must be either 1 or  "
-                    "equal to the number of epochs. "
-                )
-            else:
-                xo, yo, ro = self._math.cast(xo, yo, ro)
-   
+            xo, yo, ro = self._math.cast(xo, yo, ro)
+            # if len(xo) != self.nt or len(yo) != self.nt or len(ro) != self.nt:
+            #     raise ValueError(
+            #         "The number of occultation positions must be either 1 or  "
+            #         "equal to the number of epochs. "
+            #     )
+            # else:
+                
 
         theta = self._get_default_theta(theta)
 
