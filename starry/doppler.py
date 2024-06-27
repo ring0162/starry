@@ -1310,11 +1310,11 @@ class DopplerMap:
                     xo = self._math.cast(xo)
                 if type(yo) == float:
                     yo = yo * tt.ones(self.nt)
-                elif len(yo) != self.nt:
-                    raise ValueError(
-                        "The number of occultation positions must be either 1 or  "
-                        "equal to the number of epochs. "
-                    )
+                # elif len(yo) != self.nt:
+                #     raise ValueError(
+                #         "The number of occultation positions must be either 1 or  "
+                #         "equal to the number of epochs. "
+                #     )
                 else:
                     yo = self._math.cast(yo)
         elif ro.any() != 0:
