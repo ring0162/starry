@@ -2329,14 +2329,35 @@ class OpsDoppler(OpsYlm):
         return tt.reshape(flux, (self.nt, self.nw))
 
     @autocompile
-    def get_flux_from_conv(self, inc, theta, veq, u, a, xo, yo, ro):
+    def get_flux_from_conv(self, inc, theta, veq, u, a):
         """
         Compute the flux via a single 2d convolution.
         This is the *faster* way of computing the model.
 
         """
         # Get the convolution kernels
-        kT = self.get_kT(inc, theta, veq, u, xo, yo, ro)
+        kT = self.get_kT(inc, theta, veq, u)
+
+        # The flux is just a 2d convolution!
+        flux = tt.nnet.conv2d(
+            tt.reshape(a, (1, self.Ny, 1, self.nwp)),
+            tt.reshape(kT, (self.nt, self.Ny, 1, self.nk)),
+            border_mode="valid",
+            filter_flip=False,
+            input_shape=(1, self.Ny, 1, self.nwp),
+            filter_shape=(self.nt, self.Ny, 1, self.nk),
+        )
+        return flux[0, :, 0, :]
+    
+    @autocompile
+    def get_flux_from_conv_occult(self, inc, theta, veq, u, a, xo, yo, ro):
+        """
+        Compute the flux via a single 2d convolution.
+        This is the *faster* way of computing the model.
+
+        """
+        # Get the convolution kernels
+        kT = self.get_kT_occult(inc, theta, veq, u, xo, yo, ro)
 
         # The flux is just a 2d convolution!
         flux = tt.nnet.conv2d(
