@@ -1811,16 +1811,13 @@ class OpsDoppler(OpsYlm):
         return self.xamp / tt.maximum(tt.as_tensor_variable(1.0), vsini)
 
     @autocompile
-    def get_rT(self, x, xo, yo, ro):
-        """The `rho^T` solution vector."""
+    def get_rT(self, x):
+        """The `rho^T` solution vector for the full (unocculted) disk."""
         deg = self.ydeg + self.udeg
         sijk = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
         # Initial conditions
         r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
-        xo = xo * tt.ones_like(x)
-        yo = yo * tt.ones_like(x)
-        ro = ro * tt.ones_like(x)
 
         # Silly hack to prevent issues with the undefined derivative at x = 1
         # This just computes the square root of r2, zeroing out values very
@@ -1842,88 +1839,134 @@ class OpsDoppler(OpsYlm):
 
         # Upward recursion in i
         for i in range(1, deg + 1):
-            sijk = tt.set_subtensor(sijk[i, 0, 0], sijk[i - 1, 0, 0] * x)
-            sijk = tt.set_subtensor(sijk[i, 0, 1], sijk[i - 1, 0, 1] * x)
-            sijk = tt.set_subtensor(sijk[i, 1, 0], sijk[i - 1, 1, 0] * x)
-            sijk = tt.set_subtensor(sijk[i, 1, 1], sijk[i - 1, 1, 1] * x)
+            sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
 
-            # Upward recursion in j
-            for j in range(2, deg + 1):
-                sijk = tt.set_subtensor(
-                    sijk[i, j, 0], sijk[i - 1, j, 0] * x
-                )
-                sijk = tt.set_subtensor(
-                    sijk[i, j, 1], sijk[i - 1, j, 1] * x
-                )
+        # Full vector
+        N = (deg + 1) ** 2
+        s = tt.zeros((N, tt.shape(x)[0]))
+        n = np.arange(N)
+        LAM = np.floor(np.sqrt(n))
+        DEL = 0.5 * (n - LAM ** 2)
+        i = np.array(np.floor(LAM - DEL), dtype=int)
+        j = np.array(np.floor(DEL), dtype=int)
+        k = np.array(np.ceil(DEL) - np.floor(DEL), dtype=int)
+        s = tt.set_subtensor(s[n], sijk[i, j, k])
+        return s
 
-        # Limits for occultation
-        chi = tt.maximum((ro ** 2 - (x - xo) ** 2), tt.zeros_like(x) + 1e-100) ** 0.5
+    @autocompile
+    def get_rT_occ(self, x, xo, yo, ro):
+        """
+        The `rho^T` solution vector during an occultation.
 
+        Computes the full-disk integral and subtracts the contribution
+        blocked by an occultor at position (xo, yo) with radius ro in
+        the Doppler coordinate frame (x = lines of constant radial
+        velocity).
+        """
+        deg = self.ydeg + self.udeg
+
+        # --- Full-disk solution (same recursion as get_rT) ---
+        sijk = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
+        r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
+        r = tt.maximum(1 - x ** 2, tt.zeros_like(x) + 1e-100) ** 0.5
+        r = tt.switch(tt.gt(r, 1e-49), r, tt.zeros_like(r))
+
+        sijk = tt.set_subtensor(sijk[0, 0, 0], 2 * r)
+        sijk = tt.set_subtensor(sijk[0, 0, 1], 0.5 * np.pi * r2)
+
+        for j in range(2, deg + 1, 2):
+            sijk = tt.set_subtensor(
+                sijk[0, j, 0], ((j - 1.0) / (j + 1.0)) * r2 * sijk[0, j - 2, 0]
+            )
+            sijk = tt.set_subtensor(
+                sijk[0, j, 1], ((j - 1.0) / (j + 2.0)) * r2 * sijk[0, j - 2, 1]
+            )
+
+        for i in range(1, deg + 1):
+            sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
+
+        # --- Occultation correction ---
+        # Broadcast occultor parameters to the shape of x
+        xo = xo * tt.ones_like(x)
+        yo = yo * tt.ones_like(x)
+        ro = ro * tt.ones_like(x)
+
+        # Half-chord of the occultor at each x-slice
+        chi_sq = tt.maximum(ro ** 2 - (x - xo) ** 2, tt.zeros_like(x))
+        chi = tt.maximum(chi_sq, tt.zeros_like(x) + 1e-100) ** 0.5
+        chi = tt.switch(tt.gt(chi_sq, 0), chi, tt.zeros_like(chi))
+
+        # Determine whether each x-slice is inside the occultor's range
+        in_range = tt.and_(tt.le(xo - ro, x), tt.le(x, xo + ro))
+
+        # Upper and lower integration limits, clipped to the stellar
+        # disk boundary at y = +/- r(x)
         ul = tt.switch(
-            tt.gt(xo - ro, x), 0, 
-            tt.switch(tt.gt(x, xo + ro), 0,
-            tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r)
-            )
+            in_range,
+            tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r),
+            tt.zeros_like(r),
+        )
+        ll = tt.switch(
+            in_range,
+            tt.switch(tt.lt(yo - chi, -r), -tt.ones_like(r), (yo - chi) / r),
+            tt.zeros_like(r),
         )
 
-        ll = tt.switch(
-            tt.gt(xo - ro, x), 0,
-            tt.switch(tt.gt(x, xo + ro), 0,
-            tt.switch(tt.gt(yo - chi, -1 * r), (yo - chi) / r, -1 * tt.ones_like(r))
-            )
-        )
-    
-        # Boundary conditions for occultation
+        # Occultation integrals
         sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
-        I = tt.zeros((deg + 1, tt.shape(x)[0]))
-        I = tt.set_subtensor(
-            I[0], 0.5 * (tt.arcsin(ul) - tt.arcsin(ll) + ul * (1 - ul ** 2) ** 0.5 - ll * (1 - ll ** 2) ** 0.5)
+        # I_j auxiliary integrals (for the k=1 column of sijk_o)
+        Ij = tt.zeros((deg + 1, tt.shape(x)[0]))
+        Ij = tt.set_subtensor(
+            Ij[0],
+            0.5 * (
+                tt.arcsin(ul) - tt.arcsin(ll)
+                + ul * (1 - ul ** 2) ** 0.5
+                - ll * (1 - ll ** 2) ** 0.5
+            ),
         )
-        I = tt.set_subtensor(
-            I[1], ((1 - ll) ** (3 / 2) - (1 - ul) ** (3 / 2)) / 3
+        Ij = tt.set_subtensor(
+            Ij[1],
+            ((1 - ll ** 2) ** (3.0 / 2.0) - (1 - ul ** 2) ** (3.0 / 2.0))
+            / 3.0,
         )
 
-        sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul * r) - (ll * r))
-        sijk_o = tt.set_subtensor(sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2)
-        sijk_o = tt.set_subtensor(sijk_o[0 ,0, 1], I[0] * r2)
-        sijk_o = tt.set_subtensor(sijk_o[0, 1, 1], I[1] * r ** 3.)
+        # Initial conditions (i = 0)
+        sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul - ll) * r)
+        sijk_o = tt.set_subtensor(
+            sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2
+        )
+        sijk_o = tt.set_subtensor(sijk_o[0, 0, 1], Ij[0] * r2)
+        sijk_o = tt.set_subtensor(sijk_o[0, 1, 1], Ij[1] * r ** 3)
 
-        # Upward recursion in j
+        # Upward recursion in j (i = 0)
         for j in range(2, deg + 1):
             sijk_o = tt.set_subtensor(
-                sijk_o[0, j, 0], (1.0 / (j + 1.0)) * ((ul * r) ** (j + 1.0) - (ll * r) ** (j + 1.0))
+                sijk_o[0, j, 0],
+                (1.0 / (j + 1.0))
+                * ((ul * r) ** (j + 1) - (ll * r) ** (j + 1)),
             )
-            I = tt.set_subtensor(
-                I[j], 
-                1./(j + 2.0) * ((j - 1.0) * I[j - 2] - ul ** (j - 1.0) * (1 - ul) ** (3/2) + ll ** (j - 1.0) * (1 - ll) ** (3/2))
+            Ij = tt.set_subtensor(
+                Ij[j],
+                (1.0 / (j + 2.0))
+                * (
+                    (j - 1.0) * Ij[j - 2]
+                    - ul ** (j - 1) * (1 - ul ** 2) ** (3.0 / 2.0)
+                    + ll ** (j - 1) * (1 - ll ** 2) ** (3.0 / 2.0)
+                ),
             )
             sijk_o = tt.set_subtensor(
-                sijk_o[0, j, 1], r ** (j + 2.0) * I[j]
+                sijk_o[0, j, 1], r ** (j + 2) * Ij[j]
             )
-        
+
         # Upward recursion in i
         for i in range(1, deg + 1):
-            sijk_o = tt.set_subtensor(sijk_o[i, 0, 0], sijk_o[i - 1, 0, 0] * x)
-            sijk_o = tt.set_subtensor(sijk_o[i, 0, 1], sijk_o[i - 1, 0, 1] * x)
-            sijk_o = tt.set_subtensor(sijk_o[i, 1, 0], sijk_o[i - 1, 1, 0] * x)
-            sijk_o = tt.set_subtensor(sijk_o[i, 1, 1], sijk_o[i - 1, 1, 1] * x)
-            for j in range(2, deg + 1):
-                sijk_o = tt.set_subtensor(
-                    sijk_o[i, j, 0], sijk_o[i - 1, j, 0] * x
-                )
-                sijk_o = tt.set_subtensor(
-                    sijk_o[i, j, 1], sijk_o[i - 1, j, 1] * x
-                )
+            sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
 
-        #Subtract sijk_o from sijk element by element using set_subtensor
-        for i in range(0, deg + 1):
-            for j in range(0, deg + 1):
-                sijk = tt.set_subtensor(sijk[i, j, 0], sijk[i, j, 0] - sijk_o[i, j, 0])
-                sijk = tt.set_subtensor(sijk[i, j, 1], sijk[i, j, 1] - sijk_o[i, j, 1])
+        # Subtract the occulted region from the full-disk solution
+        sijk = sijk - sijk_o
 
-        
-        # Full vector
+        # Assemble into the polynomial-indexed vector
         N = (deg + 1) ** 2
         s = tt.zeros((N, tt.shape(x)[0]))
         n = np.arange(N)
@@ -1973,7 +2016,7 @@ class OpsDoppler(OpsYlm):
         return ts.DenseFromSparse()(A)
 
     @autocompile
-    def get_kT(self, inc, theta, veq, u, xo, yo, ro):
+    def get_kT(self, inc, theta, veq, u):
         """
         Get the kernels at an array of angular phases `theta`.
 
@@ -1981,24 +2024,63 @@ class OpsDoppler(OpsYlm):
         # Compute the convolution kernels
         vsini = self.enforce_bounds(veq * tt.sin(inc), 0.0, self.vsini_max)
         x = self.get_x(vsini)
+        rT = self.get_rT(x)
+        kT0 = self.get_kT0(rT)
+
+        # Compute the limb darkening operator
+        if self.udeg > 0:
+            F = self.F(
+                tt.as_tensor_variable(u), tt.as_tensor_variable([np.pi])
+            )
+            L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
+            kT0 = tt.dot(tt.transpose(L), kT0)
 
         # Compute the kernels at each epoch
         kT = tt.zeros((self.nt, self.Ny, self.nk))
         for m in range(self.nt):
+            kT = tt.set_subtensor(
+                kT[m],
+                tt.transpose(
+                    self.right_project(
+                        tt.transpose(kT0),
+                        inc,
+                        tt.as_tensor_variable(0.0),
+                        theta[m],
+                    )
+                ),
+            )
+        return kT
 
-            #Begin section moved into epoch loop to calculate kT0 for each occulter position    
-            rT = self.get_rT(x, xo[m], yo, ro)
+    @autocompile
+    def get_kT_occ(self, inc, theta, veq, u, xo, yo, ro):
+        """
+        Get the kernels at an array of angular phases `theta` during
+        an occultation.
+
+        Because the occultor position changes at each epoch, the rT
+        solution vector (and therefore kT0) must be recomputed per
+        epoch.  The limb-darkening operator is epoch-independent and
+        is computed once outside the loop.
+        """
+        vsini = self.enforce_bounds(veq * tt.sin(inc), 0.0, self.vsini_max)
+        x = self.get_x(vsini)
+
+        # Precompute limb-darkening operator (does not depend on epoch)
+        if self.udeg > 0:
+            F = self.F(
+                tt.as_tensor_variable(u), tt.as_tensor_variable([np.pi])
+            )
+            L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
+
+        kT = tt.zeros((self.nt, self.Ny, self.nk))
+        for m in range(self.nt):
+            # Occulted rT for this epoch's occultor x-position
+            rT = self.get_rT_occ(x, xo[m], yo, ro)
             kT0 = self.get_kT0(rT)
 
-            # Compute the limb darkening operator
             if self.udeg > 0:
-                F = self.F(
-                    tt.as_tensor_variable(u), tt.as_tensor_variable([np.pi])
-                )
-                L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
                 kT0 = tt.dot(tt.transpose(L), kT0)
 
-            #End moved section.
             kT = tt.set_subtensor(
                 kT[m],
                 tt.transpose(
@@ -2249,14 +2331,14 @@ class OpsDoppler(OpsYlm):
         return tt.reshape(flux, (self.nt, self.nw))
 
     @autocompile
-    def get_flux_from_conv(self, inc, theta, veq, u, a, xo, yo, ro):
+    def get_flux_from_conv(self, inc, theta, veq, u, a):
         """
         Compute the flux via a single 2d convolution.
         This is the *faster* way of computing the model.
 
         """
         # Get the convolution kernels
-        kT = self.get_kT(inc, theta, veq, u, xo, yo, ro)
+        kT = self.get_kT(inc, theta, veq, u)
 
         # The flux is just a 2d convolution!
         flux = tt.nnet.conv2d(
@@ -2290,6 +2372,75 @@ class OpsDoppler(OpsYlm):
 
         """
         D = self.get_D_fixed_spectrum(inc, theta, veq, u, spectrum)
+        flux = tt.dot(D, tt.reshape(tt.transpose(y), (-1,)))
+        return tt.reshape(flux, (self.nt, self.nw))
+
+    @autocompile
+    def get_flux_from_conv_occ(self, inc, theta, veq, u, a, xo, yo, ro):
+        """
+        Compute the flux via a single 2d convolution during an
+        occultation.  The occultor position ``xo`` is a vector of
+        length ``nt`` (one x-position per epoch); ``yo`` and ``ro``
+        are scalars.
+        """
+        kT = self.get_kT_occ(inc, theta, veq, u, xo, yo, ro)
+        flux = tt.nnet.conv2d(
+            tt.reshape(a, (1, self.Ny, 1, self.nwp)),
+            tt.reshape(kT, (self.nt, self.Ny, 1, self.nk)),
+            border_mode="valid",
+            filter_flip=False,
+            input_shape=(1, self.Ny, 1, self.nwp),
+            filter_shape=(self.nt, self.Ny, 1, self.nk),
+        )
+        return flux[0, :, 0, :]
+
+    @autocompile
+    def get_flux_from_dotconv_occ(
+        self, inc, theta, veq, u, y, spectrum, xo, yo, ro
+    ):
+        """
+        Compute the flux via a dot product followed by a 2d
+        convolution during an occultation.
+        """
+        kT = self.get_kT_occ(inc, theta, veq, u, xo, yo, ro)
+        kTy = tt.swapaxes(tt.dot(tt.transpose(y), kT), 0, 1)
+        spectrum_flat = tt.reshape(spectrum, (-1,))
+        if spectrum_flat.ndim == 1:
+            spectrum_flat = tt.shape_padright(spectrum_flat)
+        product = tt.nnet.conv2d(
+            tt.reshape(tt.transpose(spectrum_flat), (-1, self.nc, 1, self.nwp)),
+            tt.reshape(kTy, (self.nt, self.nc, 1, self.nk)),
+            border_mode="valid",
+            filter_flip=False,
+            input_shape=(None, self.nc, 1, self.nwp),
+            filter_shape=(self.nt, self.nc, 1, self.nk),
+        )
+        return tt.reshape(
+            tt.transpose(tt.reshape(product, (-1, self.nt * self.nw))),
+            (self.nt, self.nw),
+        )
+
+    @autocompile
+    def get_flux_from_convdot_occ(
+        self, inc, theta, veq, u, y, spectrum, xo, yo, ro
+    ):
+        """
+        Compute the flux via a 2d convolution followed by a dot
+        product during an occultation.
+        """
+        kT = self.get_kT_occ(inc, theta, veq, u, xo, yo, ro)
+        product = tt.nnet.conv2d(
+            tt.reshape(spectrum, (self.nc, 1, 1, self.nwp)),
+            tt.reshape(kT, (self.nt * self.Ny, 1, 1, self.nk)),
+            border_mode="valid",
+            filter_flip=False,
+            input_shape=(self.nc, 1, 1, self.nwp),
+            filter_shape=(self.nt * self.Ny, 1, 1, self.nk),
+        )
+        product = tt.reshape(product, (self.nc, self.nt, self.Ny, self.nw))
+        product = tt.swapaxes(product, 1, 2)
+        product = tt.reshape(product, (self.Ny * self.nc, self.nt * self.nw))
+        D = tt.transpose(product)
         flux = tt.dot(D, tt.reshape(tt.transpose(y), (-1,)))
         return tt.reshape(flux, (self.nt, self.nw))
 
