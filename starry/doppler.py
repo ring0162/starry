@@ -372,6 +372,17 @@ class DopplerMap:
         # Initialize
         self.reset(**kwargs)
 
+        # Properties dict for compatibility with starry.System
+        self.__props__ = dict(
+            limbdarkened=False,
+            reflected=False,
+            rv=False,
+            oblate=False,
+            spectral=True,
+            source_npts=0,
+            normalized=False,
+        )
+
         # Linear solver
         self._solver = Solve(self)
 
@@ -1064,12 +1075,9 @@ class DopplerMap:
                 np.linspace(0, 2 * np.pi, self._nt, endpoint=False)
             )
         else:
-            theta = (
-                self.ops.enforce_shape(
-                    self._math.cast(theta), np.array([self._nt])
-                )
-                * self._angle_factor
-            )
+            theta = self._math.cast(theta) * self._angle_factor
+            # Shape validation is skipped to allow flexible usage
+            # (e.g., when used with starry.System)
         return theta
 
     def sht_matrix(

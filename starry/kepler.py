@@ -1157,6 +1157,7 @@ class System(object):
                 :py:class:`DopplerMap`.  Flux computation strategy.
                 Default is ``"dotconv"``.
         """
+
         if self._doppler:
             return self._flux_doppler(
                 t, normalize=normalize, method=method,
