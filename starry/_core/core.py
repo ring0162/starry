@@ -2032,7 +2032,7 @@ class OpsDoppler(OpsYlm):
         return ts.DenseFromSparse()(A)
 
     @autocompile
-    def get_kT(self, inc, theta, veq, u):
+    def get_kT(self, inc, obl, theta, veq, u):
         """
         Get the kernels at an array of angular phases `theta`.
 
@@ -2060,7 +2060,7 @@ class OpsDoppler(OpsYlm):
                     self.right_project(
                         tt.transpose(kT0),
                         inc,
-                        tt.as_tensor_variable(0.0),
+                        obl,
                         theta[m],
                     )
                 ),
@@ -2068,7 +2068,7 @@ class OpsDoppler(OpsYlm):
         return kT
 
     @autocompile
-    def get_kT_occ(self, inc, theta, veq, u, xo, yo, ro):
+    def get_kT_occ(self, inc, obl, theta, veq, u, xo, yo, ro):
         """
         Get the kernels at an array of angular phases `theta` during
         an occultation.
@@ -2129,7 +2129,7 @@ class OpsDoppler(OpsYlm):
                     self.right_project(
                         tt.transpose(kT0),
                         inc,
-                        tt.as_tensor_variable(0.0),
+                        obl,
                         theta[m],
                     )
                 ),
@@ -2137,7 +2137,7 @@ class OpsDoppler(OpsYlm):
         return kT
 
     @autocompile
-    def get_D_data(self, kT0, inc, theta_scalar):
+    def get_D_data(self, kT0, inc, obl, theta_scalar):
         """
         Return the Doppler matrix as a stack of data arrays.
 
@@ -2147,14 +2147,14 @@ class OpsDoppler(OpsYlm):
             self.right_project(
                 tt.transpose(kT0),
                 inc,
-                tt.as_tensor_variable(0.0),
+                obl,
                 theta_scalar,
             )
         )
         return tt.tile(tt.reshape(kT, (-1,)), self.nw)
 
     @autocompile
-    def get_D(self, inc, theta, veq, u):
+    def get_D(self, inc, obl, theta, veq, u):
         """
         Return the full Doppler matrix.
 
@@ -2183,7 +2183,7 @@ class OpsDoppler(OpsYlm):
         return ts.vstack(
             [
                 ts.basic.CSR(
-                    self.get_D_data(kT0, inc, theta[m]),
+                    self.get_D_data(kT0, inc, obl, theta[m]),
                     self.indices,
                     self.indptr,
                     self.shape,
@@ -2193,7 +2193,7 @@ class OpsDoppler(OpsYlm):
         )
 
     @autocompile
-    def get_D_fixed_spectrum(self, inc, theta, veq, u, spectrum):
+    def get_D_fixed_spectrum(self, inc, obl, theta, veq, u, spectrum):
         """
         Return the Doppler matrix for a fixed spectrum.
 
@@ -2202,7 +2202,7 @@ class OpsDoppler(OpsYlm):
 
         """
         # Get the convolution kernels
-        kT = self.get_kT(inc, theta, veq, u)
+        kT = self.get_kT(inc, obl, theta, veq, u)
 
         # The dot product is just a 2d convolution!
         product = tt.nnet.conv2d(
@@ -2220,7 +2220,7 @@ class OpsDoppler(OpsYlm):
         return product
 
     @autocompile
-    def get_D_fixed_map(self, inc, theta, veq, u, y):
+    def get_D_fixed_map(self, inc, obl, theta, veq, u, y):
         """
         Return the Doppler matrix for a fixed map.
 
@@ -2229,7 +2229,7 @@ class OpsDoppler(OpsYlm):
         `dot_design_matrix_fixed_map_into` below.
 
         """
-        D = self.get_D(inc, theta, veq, u)
+        D = self.get_D(inc, obl, theta, veq, u)
         I = ts.as_sparse_variable(sparse_eye(self.nwp, format="csr"))
         Y = ts.hstack(
             [
@@ -2240,7 +2240,7 @@ class OpsDoppler(OpsYlm):
         return ts.dot(D, Y)
 
     @autocompile
-    def dot_design_matrix_fixed_map_into(self, inc, theta, veq, u, y, matrix):
+    def dot_design_matrix_fixed_map_into(self, inc, obl, theta, veq, u, y, matrix):
         """
         Dot the Doppler design matrix for a fixed Ylm map
         into an arbitrary dense `matrix`. This is equivalent to
@@ -2249,7 +2249,7 @@ class OpsDoppler(OpsYlm):
 
         """
         # Get the convolution kernels
-        kT = self.get_kT(inc, theta, veq, u)
+        kT = self.get_kT(inc, obl, theta, veq, u)
 
         # Dot them into the Ylms
         # kTy has shape (nt, nc, nk)
@@ -2272,7 +2272,7 @@ class OpsDoppler(OpsYlm):
 
     @autocompile
     def dot_design_matrix_fixed_map_transpose_into(
-        self, inc, theta, veq, u, y, matrix
+        self, inc, obl, theta, veq, u, y, matrix
     ):
         """
         Dot the transpose of the Doppler design matrix for a fixed Ylm map
@@ -2282,7 +2282,7 @@ class OpsDoppler(OpsYlm):
 
         """
         # Get the convolution kernels
-        kT = self.get_kT(inc, theta, veq, u)
+        kT = self.get_kT(inc, obl, theta, veq, u)
 
         # Dot them into the Ylms
         # kTy has shape (nt, nc, nk)
@@ -2306,7 +2306,7 @@ class OpsDoppler(OpsYlm):
         return tt.reshape(product, (self.nc * self.nwp, -1))
 
     @autocompile
-    def dot_design_matrix_into(self, inc, theta, veq, u, matrix):
+    def dot_design_matrix_into(self, inc, obl, theta, veq, u, matrix):
         """
         Dot the full Doppler design matrix into an arbitrary dense `matrix`.
         This is equivalent to ``tt.dot(get_D(), matrix)``, but computes the
@@ -2314,7 +2314,7 @@ class OpsDoppler(OpsYlm):
 
         """
         # Get the convolution kernels
-        kT = self.get_kT(inc, theta, veq, u)
+        kT = self.get_kT(inc, obl, theta, veq, u)
 
         # Ensure we have a matrix, not a vector
         if matrix.ndim == 1:
@@ -2332,7 +2332,7 @@ class OpsDoppler(OpsYlm):
         return tt.transpose(tt.reshape(product, (-1, self.nt * self.nw)))
 
     @autocompile
-    def dot_design_matrix_transpose_into(self, inc, theta, veq, u, matrix):
+    def dot_design_matrix_transpose_into(self, inc, obl, theta, veq, u, matrix):
         """
         Dot the transpose of the full Doppler design matrix into an arbitrary
         dense `matrix`. This is equivalent to
@@ -2341,7 +2341,7 @@ class OpsDoppler(OpsYlm):
 
         """
         # Get the convolution kernels
-        kT = self.get_kT(inc, theta, veq, u)
+        kT = self.get_kT(inc, obl, theta, veq, u)
 
         # Ensure we have a matrix, not a vector
         if matrix.ndim == 1:
@@ -2361,26 +2361,26 @@ class OpsDoppler(OpsYlm):
         return tt.reshape(product, (self.Ny * self.nwp, -1))
 
     @autocompile
-    def get_flux_from_design(self, inc, theta, veq, u, a):
+    def get_flux_from_design(self, inc, obl, theta, veq, u, a):
         """
         Compute the flux by dotting the design matrix into
         the spectral map. This is the *slow* way of computing
         the model.
 
         """
-        D = self.get_D(inc, theta, veq, u)
+        D = self.get_D(inc, obl, theta, veq, u)
         flux = ts.dot(D, a)
         return tt.reshape(flux, (self.nt, self.nw))
 
     @autocompile
-    def get_flux_from_conv(self, inc, theta, veq, u, a):
+    def get_flux_from_conv(self, inc, obl, theta, veq, u, a):
         """
         Compute the flux via a single 2d convolution.
         This is the *faster* way of computing the model.
 
         """
         # Get the convolution kernels
-        kT = self.get_kT(inc, theta, veq, u)
+        kT = self.get_kT(inc, obl, theta, veq, u)
 
         # The flux is just a 2d convolution!
         flux = tt.nnet.conv2d(
@@ -2394,38 +2394,38 @@ class OpsDoppler(OpsYlm):
         return flux[0, :, 0, :]
 
     @autocompile
-    def get_flux_from_dotconv(self, inc, theta, veq, u, y, spectrum):
+    def get_flux_from_dotconv(self, inc, obl, theta, veq, u, y, spectrum):
         """
         Compute the flux via a dot product followed by a 2d convolution.
         This is usually the *fastest* way of computing the model.
 
         """
         flux = self.dot_design_matrix_fixed_map_into(
-            inc, theta, veq, u, y, tt.reshape(spectrum, (-1,))
+            inc, obl, theta, veq, u, y, tt.reshape(spectrum, (-1,))
         )
         return tt.reshape(flux, (self.nt, self.nw))
 
     @autocompile
-    def get_flux_from_convdot(self, inc, theta, veq, u, y, spectrum):
+    def get_flux_from_convdot(self, inc, obl, theta, veq, u, y, spectrum):
         """
         Compute the flux via a 2d convolution follwed by a dot product.
         This is very fast, but usually slightly slower than
         ``get_flux_from_dotconv``.
 
         """
-        D = self.get_D_fixed_spectrum(inc, theta, veq, u, spectrum)
+        D = self.get_D_fixed_spectrum(inc, obl, theta, veq, u, spectrum)
         flux = tt.dot(D, tt.reshape(tt.transpose(y), (-1,)))
         return tt.reshape(flux, (self.nt, self.nw))
 
     @autocompile
-    def get_flux_from_conv_occ(self, inc, theta, veq, u, a, xo, yo, ro):
+    def get_flux_from_conv_occ(self, inc, obl, theta, veq, u, a, xo, yo, ro):
         """
         Compute the flux via a single 2d convolution during an
         occultation.  The occultor position ``xo`` is a vector of
         length ``nt`` (one x-position per epoch); ``yo`` and ``ro``
         are scalars.
         """
-        kT = self.get_kT_occ(inc, theta, veq, u, xo, yo, ro)
+        kT = self.get_kT_occ(inc, obl, theta, veq, u, xo, yo, ro)
         flux = tt.nnet.conv2d(
             tt.reshape(a, (1, self.Ny, 1, self.nwp)),
             tt.reshape(kT, (self.nt, self.Ny, 1, self.nk)),
@@ -2438,13 +2438,13 @@ class OpsDoppler(OpsYlm):
 
     @autocompile
     def get_flux_from_dotconv_occ(
-        self, inc, theta, veq, u, y, spectrum, xo, yo, ro
+        self, inc, obl, theta, veq, u, y, spectrum, xo, yo, ro
     ):
         """
         Compute the flux via a dot product followed by a 2d
         convolution during an occultation.
         """
-        kT = self.get_kT_occ(inc, theta, veq, u, xo, yo, ro)
+        kT = self.get_kT_occ(inc, obl, theta, veq, u, xo, yo, ro)
         kTy = tt.swapaxes(tt.dot(tt.transpose(y), kT), 0, 1)
         spectrum_flat = tt.reshape(spectrum, (-1,))
         if spectrum_flat.ndim == 1:
@@ -2464,13 +2464,13 @@ class OpsDoppler(OpsYlm):
 
     @autocompile
     def get_flux_from_convdot_occ(
-        self, inc, theta, veq, u, y, spectrum, xo, yo, ro
+        self, inc, obl, theta, veq, u, y, spectrum, xo, yo, ro
     ):
         """
         Compute the flux via a 2d convolution followed by a dot
         product during an occultation.
         """
-        kT = self.get_kT_occ(inc, theta, veq, u, xo, yo, ro)
+        kT = self.get_kT_occ(inc, obl, theta, veq, u, xo, yo, ro)
         product = tt.nnet.conv2d(
             tt.reshape(spectrum, (self.nc, 1, 1, self.nwp)),
             tt.reshape(kT, (self.nt * self.Ny, 1, 1, self.nk)),

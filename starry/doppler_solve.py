@@ -45,6 +45,7 @@ class Solve:
             # Dummy variables for compiling
             veq = tt.dscalar()
             inc = tt.dscalar()
+            obl = tt.dscalar()
             spectrum_ = tt.dmatrix()
             theta = tt.dvector()
             x = tt.dmatrix()
@@ -58,40 +59,46 @@ class Solve:
             tol = tt.dscalar()
 
             # Design matrix conditioned on current spectrum
-            f = map.ops.get_D_fixed_spectrum(inc, theta, veq, u, spectrum_)
+            f = map.ops.get_D_fixed_spectrum(
+                inc, obl, theta, veq, u, spectrum_
+            )
             if map._interp:
                 f = ts.dot(map._Si2eBlk, f)
             _get_S = theano.function(
-                [inc, theta, veq, u, spectrum_], f, on_unused_input="ignore"
+                [inc, obl, theta, veq, u, spectrum_],
+                f, on_unused_input="ignore",
             )
             self._get_S = lambda: _get_S(
-                self.inc, self.theta, self.veq, self.u, self.spectrum_
+                self.inc, self.obl, self.theta, self.veq, self.u,
+                self.spectrum_,
             )
 
             # Design matrix dot product conditioned on current map
             f = map.ops.dot_design_matrix_fixed_map_into(
-                inc, theta, veq, u, y, x
+                inc, obl, theta, veq, u, y, x
             )
             if map._interp:
                 f = ts.dot(map._Si2eBlk, f)
             _dotM = theano.function(
-                [inc, theta, veq, u, y, x], f, on_unused_input="ignore"
+                [inc, obl, theta, veq, u, y, x],
+                f, on_unused_input="ignore",
             )
             self.dotM = lambda x: _dotM(
-                self.inc, self.theta, self.veq, self.u, self.y, x
+                self.inc, self.obl, self.theta, self.veq, self.u, self.y, x
             )
 
             # Transpose of the the above op
             f = map.ops.dot_design_matrix_fixed_map_transpose_into(
-                inc, theta, veq, u, y, x
+                inc, obl, theta, veq, u, y, x
             )
             if map._interp:
                 f = ts.dot(map._Si2eBlk, f)
             _dotMT = theano.function(
-                [inc, theta, veq, u, y, x], f, on_unused_input="ignore"
+                [inc, obl, theta, veq, u, y, x],
+                f, on_unused_input="ignore",
             )
             self.dotMT = lambda x: _dotMT(
-                self.inc, self.theta, self.veq, self.u, self.y, x
+                self.inc, self.obl, self.theta, self.veq, self.u, self.y, x
             )
 
             # Line broadening matrix
@@ -734,7 +741,9 @@ class Solve:
             # Solve for the spectrum
             self.solve_for_spectrum_linear()
 
-    def solve_bilinear(self, flux, theta, y, spectrum_, veq, inc, u, **kwargs):
+    def solve_bilinear(
+        self, flux, theta, y, spectrum_, veq, inc, obl, u, **kwargs
+    ):
         """
         Solve the linear problem for the spatial and/or spectral map
         given a spectral timeseries.
@@ -748,6 +757,7 @@ class Solve:
         self.theta = theta
         self.veq = veq
         self.inc = inc
+        self.obl = obl
         self.y = y
         self.u = u
         self.cho_ycov = None
@@ -793,6 +803,7 @@ class Solve:
         spectrum_,
         veq,
         inc,
+        obl,
         u,
         lr=2e-5,
         niter=1000,
@@ -822,7 +833,7 @@ class Solve:
 
         # Compute the exact model
         tt_model = self.get_flux_from_dotconv(
-            inc, theta, veq, u, tt_y, tt_spectrum_
+            inc, obl, theta, veq, u, tt_y, tt_spectrum_
         )
 
         # Interpolate to the output grid

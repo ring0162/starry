@@ -1250,20 +1250,20 @@ class DopplerMap:
 
             # Fixed spectrum (dense)
             D = self.ops.get_D_fixed_spectrum(
-                self._inc, theta, self._veq, self._u, self._spectrum
+                self._inc, self._obl, theta, self._veq, self._u, self._spectrum
             )
 
         elif fix_map:
 
             # Fixed map (dense)
             D = self.ops.get_D_fixed_map(
-                self._inc, theta, self._veq, self._u, self._y
+                self._inc, self._obl, theta, self._veq, self._u, self._y
             )
 
         else:
 
             # Full matrix (sparse)
-            D = self.ops.get_D(self._inc, theta, self._veq, self._u)
+            D = self.ops.get_D(self._inc, self._obl, theta, self._veq, self._u)
 
         # Interpolate to the output grid
         if self._interp:
@@ -1324,17 +1324,17 @@ class DopplerMap:
             xo, yo, ro = self._math.cast(xo, yo, ro)
             if method == "dotconv":
                 flux = self.ops.get_flux_from_dotconv_occ(
-                    self._inc, theta, self._veq, self._u,
+                    self._inc, self._obl, theta, self._veq, self._u,
                     self._y, self._spectrum, xo, yo, ro,
                 )
             elif method == "convdot":
                 flux = self.ops.get_flux_from_convdot_occ(
-                    self._inc, theta, self._veq, self._u,
+                    self._inc, self._obl, theta, self._veq, self._u,
                     self._y, self._spectrum, xo, yo, ro,
                 )
             elif method == "conv":
                 flux = self.ops.get_flux_from_conv_occ(
-                    self._inc, theta, self._veq, self._u,
+                    self._inc, self._obl, theta, self._veq, self._u,
                     self.spectral_map, xo, yo, ro,
                 )
             elif method == "design":
@@ -1349,22 +1349,22 @@ class DopplerMap:
         else:
             if method == "dotconv":
                 flux = self.ops.get_flux_from_dotconv(
-                    self._inc, theta, self._veq, self._u,
+                    self._inc, self._obl, theta, self._veq, self._u,
                     self._y, self._spectrum,
                 )
             elif method == "convdot":
                 flux = self.ops.get_flux_from_convdot(
-                    self._inc, theta, self._veq, self._u,
+                    self._inc, self._obl, theta, self._veq, self._u,
                     self._y, self._spectrum,
                 )
             elif method == "conv":
                 flux = self.ops.get_flux_from_conv(
-                    self._inc, theta, self._veq, self._u,
+                    self._inc, self._obl, theta, self._veq, self._u,
                     self.spectral_map,
                 )
             elif method == "design":
                 flux = self.ops.get_flux_from_design(
-                    self._inc, theta, self._veq, self._u,
+                    self._inc, self._obl, theta, self._veq, self._u,
                     self.spectral_map,
                 )
             else:
@@ -1500,20 +1500,22 @@ class DopplerMap:
 
                 # This is inherently fast -- no need for a special Op
                 D = self.ops.get_D_fixed_spectrum(
-                    self._inc, theta, self._veq, self._u, self._spectrum
+                    self._inc, self._obl, theta, self._veq, self._u,
+                    self._spectrum,
                 )
                 product = self._math.dot(self._math.transpose(D), x)
 
             elif fix_map:
 
                 product = self.ops.dot_design_matrix_fixed_map_transpose_into(
-                    self._inc, theta, self._veq, self._u, self._y, x
+                    self._inc, self._obl, theta, self._veq, self._u,
+                    self._y, x,
                 )
 
             else:
 
                 product = self.ops.dot_design_matrix_transpose_into(
-                    self._inc, theta, self._veq, self._u, x
+                    self._inc, self._obl, theta, self._veq, self._u, x
                 )
 
         else:
@@ -1522,20 +1524,22 @@ class DopplerMap:
 
                 # This is inherently fast -- no need for a special Op
                 D = self.ops.get_D_fixed_spectrum(
-                    self._inc, theta, self._veq, self._u, self._spectrum
+                    self._inc, self._obl, theta, self._veq, self._u,
+                    self._spectrum,
                 )
                 product = self._math.dot(D, x)
 
             elif fix_map:
 
                 product = self.ops.dot_design_matrix_fixed_map_into(
-                    self._inc, theta, self._veq, self._u, self._y, x
+                    self._inc, self._obl, theta, self._veq, self._u,
+                    self._y, x,
                 )
 
             else:
 
                 product = self.ops.dot_design_matrix_into(
-                    self._inc, theta, self._veq, self._u, x
+                    self._inc, self._obl, theta, self._veq, self._u, x
                 )
 
             # Interpolate from `wav_` to `wav` at each epoch
@@ -1969,6 +1973,7 @@ class DopplerMap:
             u = get_val(self._u)
             veq = get_val(self._veq)
             inc = get_val(self._inc)  # rad
+            obl = get_val(self._obl)  # rad
             theta = get_val(
                 self._get_default_theta(kwargs.pop("theta", None))
             )  # rad
@@ -1983,16 +1988,17 @@ class DopplerMap:
             spectrum_ = self.spectrum_
             veq = self._veq
             inc = self._inc  # rad
+            obl = self._obl  # rad
             theta = self._get_default_theta(kwargs.pop("theta", None))  # rad
 
         # Run the solver
         if solver.lower().startswith("bi"):
             soln = self._solver.solve_bilinear(
-                flux, theta, y, spectrum_, veq, inc, u, **kwargs
+                flux, theta, y, spectrum_, veq, inc, obl, u, **kwargs
             )
         elif solver.lower().startswith("non"):
             soln = self._solver.solve_nonlinear(
-                flux, theta, y, spectrum_, veq, inc, u, **kwargs
+                flux, theta, y, spectrum_, veq, inc, obl, u, **kwargs
             )
         else:
             raise ValueError("Invalid `solver`.")
