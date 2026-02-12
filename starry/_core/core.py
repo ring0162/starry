@@ -1900,15 +1900,21 @@ class OpsDoppler(OpsYlm):
         in_range = tt.and_(tt.le(xo - ro, x), tt.le(x, xo + ro))
 
         # Upper and lower integration limits, clipped to the stellar
-        # disk boundary at y = +/- r(x)
+        # disk boundary at y = +/- r(x).
+        # NOTE: We must guard the division by r to avoid 0/0 at the
+        # stellar limb (x = ±1 where r = 0).  Theano's switch evaluates
+        # both branches, so an unguarded division produces NaN that
+        # poisons the result even though the switch would select the
+        # other branch.
+        r_safe = tt.maximum(r, tt.ones_like(r) * 1e-30)
         ul = tt.switch(
             in_range,
-            tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r),
+            tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r_safe),
             tt.zeros_like(r),
         )
         ll = tt.switch(
             in_range,
-            tt.switch(tt.lt(yo - chi, -r), -tt.ones_like(r), (yo - chi) / r),
+            tt.switch(tt.lt(yo - chi, -r), -tt.ones_like(r), (yo - chi) / r_safe),
             tt.zeros_like(r),
         )
 
