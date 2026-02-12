@@ -1918,6 +1918,12 @@ class OpsDoppler(OpsYlm):
             tt.zeros_like(r),
         )
 
+        # Hard-clamp ul, ll to [-1, 1] so that arcsin and (1 - u^2)^p
+        # never receive out-of-range inputs (can happen due to floating-
+        # point arithmetic even though the switch logic should prevent it).
+        ul = tt.clip(ul, -1.0, 1.0)
+        ll = tt.clip(ll, -1.0, 1.0)
+
         # Occultation integrals
         sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
 
@@ -1994,8 +2000,12 @@ class OpsDoppler(OpsYlm):
         surface.
         """
         kT0 = ts.dot(ts.transpose(self._A1Big), rT)
-        # Normalize to preserve the unit baseline
-        return kT0 / tt.sum(kT0[0])
+        # Normalize to preserve the unit baseline.
+        # Guard against zero denominator (e.g. if the visible disk
+        # area is numerically zero).
+        norm = tt.sum(kT0[0])
+        norm = tt.switch(tt.eq(norm, 0), tt.ones_like(norm), norm)
+        return kT0 / norm
 
     @autocompile
     def get_kT0_matrix(self, veq, inc):
@@ -2063,10 +2073,13 @@ class OpsDoppler(OpsYlm):
         Get the kernels at an array of angular phases `theta` during
         an occultation.
 
-        Because the occultor position changes at each epoch, the rT
-        solution vector (and therefore kT0) must be recomputed per
-        epoch.  The limb-darkening operator is epoch-independent and
-        is computed once outside the loop.
+        For epochs where the occultor's projected disk does not overlap
+        the stellar disk, we reuse the standard (non-occultation) kT0 to
+        avoid numerical issues in the occultation integrals.  For
+        on-disk epochs, kT0 is recomputed from the occulted rT.
+
+        The limb-darkening operator is epoch-independent and is computed
+        once outside the loop.
 
         Args:
             xo: Occultor x-position, vector of length ``nt``.
@@ -2076,21 +2089,39 @@ class OpsDoppler(OpsYlm):
         vsini = self.enforce_bounds(veq * tt.sin(inc), 0.0, self.vsini_max)
         x = self.get_x(vsini)
 
+        # --- Compute the unocculted (full-disk) kT0 once ---
+        rT_full = self.get_rT(x)
+        kT0_full = self.get_kT0(rT_full)
+
         # Precompute limb-darkening operator (does not depend on epoch)
         if self.udeg > 0:
             F = self.F(
                 tt.as_tensor_variable(u), tt.as_tensor_variable([np.pi])
             )
             L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
+            kT0_full = tt.dot(tt.transpose(L), kT0_full)
 
         kT = tt.zeros((self.nt, self.Ny, self.nk))
         for m in range(self.nt):
-            # Occulted rT for this epoch's occultor position
-            rT = self.get_rT_occ(x, xo[m], yo[m], ro)
-            kT0 = self.get_kT0(rT)
+            # Check whether the occultor's disk could overlap the star.
+            # The occultor (circle of radius ro centred at (xo, yo)) can
+            # overlap the unit stellar disk only when the centre-to-centre
+            # distance is less than 1 + ro.
+            dist_sq = xo[m] ** 2 + yo[m] ** 2
+            on_disk = tt.lt(dist_sq, (1.0 + ro) ** 2)
+
+            # Occulted kT0 for this epoch (always computed because Theano
+            # evaluates both branches of tt.switch, but its result is only
+            # selected when on_disk is True).
+            rT_occ = self.get_rT_occ(x, xo[m], yo[m], ro)
+            kT0_occ = self.get_kT0(rT_occ)
 
             if self.udeg > 0:
-                kT0 = tt.dot(tt.transpose(L), kT0)
+                kT0_occ = tt.dot(tt.transpose(L), kT0_occ)
+
+            # Select: use the occulted kT0 when the occultor is on-disk,
+            # otherwise fall back to the clean full-disk kT0.
+            kT0 = tt.switch(on_disk, kT0_occ, kT0_full)
 
             kT = tt.set_subtensor(
                 kT[m],
