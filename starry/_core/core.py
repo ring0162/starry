@@ -2089,6 +2089,17 @@ class OpsDoppler(OpsYlm):
         vsini = self.enforce_bounds(veq * tt.sin(inc), 0.0, self.vsini_max)
         x = self.get_x(vsini)
 
+        # --- Rotate planet positions from sky frame to canonical frame ---
+        # The Doppler velocity field is computed in a canonical frame where
+        # the stellar spin axis projects along the y-axis (obl=0).  The
+        # planet positions (xo, yo) arrive in the observer's sky frame.
+        # We rotate them by -obl so the occultation integral sees the
+        # planet in the correct position relative to the velocity field.
+        cos_obl = tt.cos(obl)
+        sin_obl = tt.sin(obl)
+        xo_rot = xo * cos_obl + yo * sin_obl
+        yo_rot = -xo * sin_obl + yo * cos_obl
+
         # --- Compute the unocculted (full-disk) kT0 once ---
         rT_full = self.get_rT(x)
         kT0_full = self.get_kT0(rT_full)
@@ -2104,16 +2115,13 @@ class OpsDoppler(OpsYlm):
         kT = tt.zeros((self.nt, self.Ny, self.nk))
         for m in range(self.nt):
             # Check whether the occultor's disk could overlap the star.
-            # The occultor (circle of radius ro centred at (xo, yo)) can
-            # overlap the unit stellar disk only when the centre-to-centre
-            # distance is less than 1 + ro.
+            # Distance is rotation-invariant so we can use either frame.
             dist_sq = xo[m] ** 2 + yo[m] ** 2
             on_disk = tt.lt(dist_sq, (1.0 + ro) ** 2)
 
-            # Occulted kT0 for this epoch (always computed because Theano
-            # evaluates both branches of tt.switch, but its result is only
-            # selected when on_disk is True).
-            rT_occ = self.get_rT_occ(x, xo[m], yo[m], ro)
+            # Occulted kT0 for this epoch, using rotated planet positions
+            # so the occultation is computed in the canonical velocity frame.
+            rT_occ = self.get_rT_occ(x, xo_rot[m], yo_rot[m], ro)
             kT0_occ = self.get_kT0(rT_occ)
 
             if self.udeg > 0:
