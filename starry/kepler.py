@@ -2,6 +2,7 @@
 from . import config
 from ._constants import *
 from .maps import MapBase, RVBase, ReflectedBase
+from .doppler import DopplerMap
 from ._core import OpsSystem, math
 from .compat import evaluator
 import numpy as np
@@ -122,9 +123,9 @@ class Body(object):
 
     @map.setter
     def map(self, value):
-        assert MapBase in getmro(
-            type(value)
-        ), "The `map` attribute must be a `starry` map instance."
+        assert MapBase in getmro(type(value)) or isinstance(
+            value, DopplerMap
+        ), "The `map` attribute must be a `starry` map or `DopplerMap` instance."
         assert (
             value._lazy == self._lazy
         ), "Map must have the same evaluation mode (lazy/greedy)."
@@ -445,18 +446,28 @@ class System(object):
         assert (
             type(primary) is Primary
         ), "Argument `primary` must be an instance of `Primary`."
-        assert (
-            primary._map.__props__["reflected"] == False
-        ), "Reflected light map not allowed for the primary body."
         self._primary = primary
-        self._rv = primary._map.__props__["rv"]
-        self._oblate = primary._map.__props__["oblate"]
+        self._doppler = isinstance(primary._map, DopplerMap)
         self._lazy = primary._lazy
         self._math = primary._math
         if self._lazy:
             self._linalg = math.lazy_linalg
         else:
             self._linalg = math.greedy_linalg
+
+        if self._doppler:
+            # DopplerMap primary: spectral Doppler imaging with
+            # occultation support.  The design-matrix path is bypassed;
+            # System.flux() will delegate to DopplerMap.flux() directly.
+            self._rv = False
+            self._oblate = False
+            self._reflected = False
+        else:
+            assert (
+                primary._map.__props__["reflected"] == False
+            ), "Reflected light map not allowed for the primary body."
+            self._rv = primary._map.__props__["rv"]
+            self._oblate = primary._map.__props__["oblate"]
 
         # Secondary bodies
         assert len(secondaries) > 0, "There must be at least one secondary."
@@ -465,13 +476,14 @@ class System(object):
                 "Argument `*secondaries` must be a sequence of "
                 "`Secondary` instances."
             )
-            assert (
-                sec._map.nw == self._primary._map.nw
-            ), "All bodies must have the same number of wavelength bins `nw`."
-            assert sec._map.__props__["rv"] == self._rv, (
-                "Radial velocity must be enabled "
-                "for either all or none of the bodies."
-            )
+            if not self._doppler:
+                assert (
+                    sec._map.nw == self._primary._map.nw
+                ), "All bodies must have the same number of wavelength bins `nw`."
+                assert sec._map.__props__["rv"] == self._rv, (
+                    "Radial velocity must be enabled "
+                    "for either all or none of the bodies."
+                )
             assert (
                 sec._lazy == self._lazy
             ), "All bodies must have the same evaluation mode (lazy/greedy)."
@@ -479,30 +491,34 @@ class System(object):
                 "oblate"
             ], "Oblate secondary bodies are not currently supported."
 
-        reflected = [sec._map.__props__["reflected"] for sec in secondaries]
-        if np.all(reflected):
-            self._reflected = True
-        elif np.any(reflected):
-            raise ValueError(
-                "Reflected light must be enabled "
-                "for either all or none of the secondaries."
-            )
-        else:
-            self._reflected = False
+        if not self._doppler:
+            reflected = [
+                sec._map.__props__["reflected"] for sec in secondaries
+            ]
+            if np.all(reflected):
+                self._reflected = True
+            elif np.any(reflected):
+                raise ValueError(
+                    "Reflected light must be enabled "
+                    "for either all or none of the secondaries."
+                )
+            else:
+                self._reflected = False
         self._secondaries = secondaries
 
         # All bodies
         self._bodies = [self._primary] + list(self._secondaries)
 
         # Indices of each of the bodies in the design matrix
-        Ny = [self._primary._map.Ny] + [
-            sec._map.Ny for sec in self._secondaries
-        ]
-        self._inds = []
-        cur = 0
-        for N in Ny:
-            self._inds.append(cur + np.arange(N))
-            cur += N
+        if not self._doppler:
+            Ny = [self._primary._map.Ny] + [
+                sec._map.Ny for sec in self._secondaries
+            ]
+            self._inds = []
+            cur = 0
+            for N in Ny:
+                self._inds.append(cur + np.arange(N))
+                cur += N
 
         # Theano ops class
         self.ops = OpsSystem(
@@ -1002,7 +1018,130 @@ class System(object):
             ),
         )
 
-    def flux(self, t, total=True, integrated=False):
+    def _flux_doppler(self, t, normalize=True, method="dotconv"):
+        """Compute the spectral flux for a DopplerMap primary at times ``t``.
+
+        This method bypasses the design-matrix formalism and delegates
+        directly to :py:meth:`DopplerMap.flux`, passing the occultor
+        positions derived from the Keplerian orbital solution.
+
+        Args:
+            t (vector): An array of times at which to evaluate the flux
+                in units of :py:attr:`time_unit`.  Must have length equal
+                to the DopplerMap's :py:attr:`nt`.
+            normalize (bool, optional): Normalize each epoch's spectrum
+                by the continuum level. Default is True.
+            method (str, optional): Flux computation strategy forwarded to
+                :py:meth:`DopplerMap.flux`.  Default is ``"dotconv"``.
+
+        Returns:
+            A matrix of shape ``(nt, nw)`` — the spectral timeseries of
+            the primary, including any transit-induced distortions.
+        """
+        doppler_map = self._primary._map
+        nt = doppler_map.nt
+        t_arr = self._math.reshape(
+            self._math.to_array_or_tensor(t), [-1]
+        )
+        t_internal = t_arr * self._time_factor
+
+        # --- Rotational phase of the primary (in DopplerMap angle_unit) ---
+        pri_prot = self._primary._prot
+        pri_t0 = self._primary._t0
+        pri_theta0 = self._primary._theta0
+        if np.allclose(float(pri_prot), 0.0):
+            theta_rad = pri_theta0 * np.ones(nt)
+        else:
+            theta_rad = (
+                (2 * np.pi) / pri_prot * (t_internal - pri_t0) + pri_theta0
+            )
+        # DopplerMap.flux() multiplies theta by _angle_factor internally,
+        # so convert from radians to the DopplerMap's angle_unit.
+        theta = theta_rad / doppler_map._angle_factor
+
+        # --- Compute positions of all bodies (absolute, barycentric) ---
+        x_abs, y_abs, z_abs = self.ops.position(
+            t_internal,
+            self._primary._m,
+            self._primary._t0,
+            self._math.to_array_or_tensor(
+                [sec._m for sec in self._secondaries]
+            ),
+            self._math.to_array_or_tensor(
+                [sec._t0 for sec in self._secondaries]
+            ),
+            self._get_periods(),
+            self._math.to_array_or_tensor(
+                [sec._ecc for sec in self._secondaries]
+            ),
+            self._math.to_array_or_tensor(
+                [sec._w for sec in self._secondaries]
+            ),
+            self._math.to_array_or_tensor(
+                [sec._Omega for sec in self._secondaries]
+            ),
+            self._math.to_array_or_tensor(
+                [sec._inc for sec in self._secondaries]
+            ),
+        )
+        # x_abs[0] = primary, x_abs[i+1] = secondary i  (each shape ntime)
+
+        # --- Single secondary: pass positions directly ---
+        #
+        # When the planet is far from the stellar disk the occultation
+        # math naturally computes zero correction, so we can pass the
+        # raw positions for ALL epochs (not just in-transit ones).
+        pri_r = self._primary._r
+        if len(self._secondaries) == 1:
+            sec = self._secondaries[0]
+            xo = (x_abs[1] - x_abs[0]) / pri_r
+            yo = (y_abs[1] - y_abs[0]) / pri_r
+            ro = sec._r / pri_r
+            return doppler_map.flux(
+                theta=theta,
+                normalize=normalize,
+                method=method,
+                xo=xo,
+                yo=yo,
+                ro=ro,
+            )
+
+        # --- Multiple secondaries: superposition of occultation effects ---
+        #
+        # DopplerMap supports a single occultor per call.  We compute
+        # the unocculted flux once and then add the per-secondary
+        # transit correction ``(flux_occ_i - flux_base)`` for each
+        # secondary.  This is exact for non-overlapping transits
+        # (the typical case) and approximate otherwise.
+        # Normalization is deferred to the end.
+        flux_base = doppler_map.flux(
+            theta=theta, normalize=False, method=method,
+        )
+        flux = flux_base
+        for i, sec in enumerate(self._secondaries):
+            xo_i = (x_abs[i + 1] - x_abs[0]) / pri_r
+            yo_i = (y_abs[i + 1] - y_abs[0]) / pri_r
+            ro_i = sec._r / pri_r
+            flux_occ_i = doppler_map.flux(
+                theta=theta,
+                normalize=False,
+                method=method,
+                xo=xo_i,
+                yo=yo_i,
+                ro=ro_i,
+            )
+            # Add the transit dimming from this secondary.
+            # flux_occ_i == flux_base for non-transit epochs (zero delta).
+            flux = flux + (flux_occ_i - flux_base)
+
+        if normalize:
+            flux /= self._math.reshape(
+                flux[:, doppler_map._continuum_idx], (nt, 1)
+            )
+        return flux
+
+    def flux(self, t, total=True, integrated=False, normalize=True,
+             method="dotconv"):
         """Compute the system flux at times ``t``.
 
         Args:
@@ -1011,7 +1150,18 @@ class System(object):
             total (bool, optional): Return the total system flux? Defaults to
                 True. If False, returns arrays corresponding to the flux
                 from each body.
+            normalize (bool, optional): Only used when the primary is a
+                :py:class:`DopplerMap`.  Normalize each spectrum by the
+                continuum level.  Default is True.
+            method (str, optional): Only used when the primary is a
+                :py:class:`DopplerMap`.  Flux computation strategy.
+                Default is ``"dotconv"``.
         """
+        if self._doppler:
+            return self._flux_doppler(
+                t, normalize=normalize, method=method,
+            )
+
         X = self.design_matrix(t)
 
         # Weight the ylms by amplitude

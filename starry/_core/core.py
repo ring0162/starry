@@ -2061,6 +2061,11 @@ class OpsDoppler(OpsYlm):
         solution vector (and therefore kT0) must be recomputed per
         epoch.  The limb-darkening operator is epoch-independent and
         is computed once outside the loop.
+
+        Args:
+            xo: Occultor x-position, vector of length ``nt``.
+            yo: Occultor y-position, vector of length ``nt``.
+            ro: Occultor radius (scalar).
         """
         vsini = self.enforce_bounds(veq * tt.sin(inc), 0.0, self.vsini_max)
         x = self.get_x(vsini)
@@ -2074,8 +2079,8 @@ class OpsDoppler(OpsYlm):
 
         kT = tt.zeros((self.nt, self.Ny, self.nk))
         for m in range(self.nt):
-            # Occulted rT for this epoch's occultor x-position
-            rT = self.get_rT_occ(x, xo[m], yo, ro)
+            # Occulted rT for this epoch's occultor position
+            rT = self.get_rT_occ(x, xo[m], yo[m], ro)
             kT0 = self.get_kT0(rT)
 
             if self.udeg > 0:

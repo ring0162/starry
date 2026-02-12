@@ -1264,7 +1264,7 @@ class DopplerMap:
         return D
 
     def flux(self, theta=None, normalize=True, method="dotconv",
-             xo=None, yo=0, ro=0):
+             xo=None, yo=None, ro=0):
         """
         Return the model for the full spectral timeseries.
 
@@ -1292,7 +1292,9 @@ class DopplerMap:
             xo (vector, optional): The x-position of the occultor at each
                 epoch.  Must be a vector of length :py:attr:`nt`.  If None
                 (default), no occultation is computed.
-            yo (float, optional): The y-position of the occultor. Default 0.
+            yo (scalar or vector, optional): The y-position of the occultor.
+                If a scalar, broadcast to a vector of length :py:attr:`nt`.
+                If None (default), set to zeros.
             ro (float, optional): The radius of the occultor. Default 0.
 
         This method returns a matrix of shape (:py:attr:`nt`, :py:attr:`nw`)
@@ -1306,6 +1308,11 @@ class DopplerMap:
         occultation = xo is not None and not np.allclose(ro, 0)
 
         if occultation:
+            # Broadcast yo to a vector of length nt if scalar or None
+            if yo is None:
+                yo = np.zeros(self._nt)
+            elif np.ndim(yo) == 0:
+                yo = np.ones(self._nt) * yo
             xo, yo, ro = self._math.cast(xo, yo, ro)
             if method == "dotconv":
                 flux = self.ops.get_flux_from_dotconv_occ(
