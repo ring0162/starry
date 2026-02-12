@@ -2060,7 +2060,7 @@ class OpsDoppler(OpsYlm):
                     self.right_project(
                         tt.transpose(kT0),
                         inc,
-                        obl,
+                        tt.as_tensor_variable(0.0),
                         theta[m],
                     )
                 ),
@@ -2137,7 +2137,7 @@ class OpsDoppler(OpsYlm):
                     self.right_project(
                         tt.transpose(kT0),
                         inc,
-                        obl,
+                        tt.as_tensor_variable(0.0),
                         theta[m],
                     )
                 ),
@@ -2150,12 +2150,13 @@ class OpsDoppler(OpsYlm):
         Return the Doppler matrix as a stack of data arrays.
 
         """
-        # Rotate the kernels
+        # Rotate the kernels (obl=0: right_project targets the canonical
+        # Doppler frame where the velocity gradient is along x)
         kT = tt.transpose(
             self.right_project(
                 tt.transpose(kT0),
                 inc,
-                obl,
+                tt.as_tensor_variable(0.0),
                 theta_scalar,
             )
         )
