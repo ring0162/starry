@@ -510,11 +510,11 @@ class DopplerMap:
         :py:attr:`angle_unit`.
 
         """
-        return self._inc / self._angle_factor
+        return self._inc / self._math.cast(self._angle_factor)
 
     @inc.setter
     def inc(self, value):
-        self._inc = self._math.cast(value) * self._angle_factor
+        self._inc = self._math.cast(value) * self._math.cast(self._angle_factor)
         self._map._inc = self._inc
 
     @property
@@ -523,11 +523,11 @@ class DopplerMap:
         :py:attr:`angle_unit`.
 
         """
-        return self._obl / self._angle_factor
+        return self._obl / self._math.cast(self._angle_factor)
 
     @obl.setter
     def obl(self, value):
-        self._obl = self._math.cast(value) * self._angle_factor
+        self._obl = self._math.cast(value) * self._math.cast(self._angle_factor)
 
     @property
     def veq(self):
@@ -535,11 +535,11 @@ class DopplerMap:
         :py:attr:`velocity_unit`.
 
         """
-        return self._veq / self._velocity_factor
+        return self._veq / self._math.cast(self._velocity_factor)
 
     @veq.setter
     def veq(self, value):
-        self._veq = self._math.cast(value) * self._velocity_factor
+        self._veq = self._math.cast(value) * self._math.cast(self._velocity_factor)
 
     @property
     def vsini(self):
@@ -548,7 +548,7 @@ class DopplerMap:
         :py:attr:`velocity_unit`. *Read-only*
 
         """
-        return self._veq * self._math.sin(self._inc) / self._velocity_factor
+        return self._veq * self._math.sin(self._inc) / self._math.cast(self._velocity_factor)
 
     @property
     def wav(self):
@@ -1313,7 +1313,8 @@ class DopplerMap:
         theta = self._get_default_theta(theta)
 
         # Determine whether we are in occultation mode
-        occultation = xo is not None and not np.allclose(ro, 0)
+        # If xo is provided, use occultation methods (they handle ro=0 naturally)
+        occultation = xo is not None
 
         if occultation:
             # Broadcast yo to a vector of length nt if scalar or None

@@ -4,7 +4,8 @@ from ._constants import *
 from .maps import MapBase, RVBase, ReflectedBase
 from .doppler import DopplerMap
 from ._core import OpsSystem, math
-from .compat import evaluator
+from ._core.utils import is_tensor
+from .compat import evaluator, theano
 import numpy as np
 from astropy import units
 from inspect import getmro
@@ -462,6 +463,30 @@ class System(object):
             self._rv = False
             self._oblate = False
             self._reflected = False
+
+            # The combined gradient graph (exoplanet orbital ops +
+            # DopplerMap convolution/occultation ops) is too large for
+            # Theano's default "fast_run" optimizer: the aggressive
+            # element-wise fusion produces a single C function that
+            # exceeds the compiler's limits.  Switching to "fast_compile"
+            # keeps individual C ops (so CorrMM etc. still work) but
+            # skips the fusion pass that causes the explosion.
+            #
+            # We must also clear the cached default mode so that
+            # theano.function() (including calls from PyMC3) picks up
+            # the new optimizer setting.
+            if self._lazy:
+                import theano.compile.mode as _tcm
+
+                theano.config.mode = "Mode"
+                theano.config.optimizer = "fast_compile"
+                theano.config.linker = "cvm"
+                _tcm.instantiated_default_mode = None
+                logger.info(
+                    "DopplerMap System: forced theano default mode to "
+                    "Mode(linker='cvm', optimizer='fast_compile') to "
+                    "avoid C compilation failures in the gradient graph."
+                )
         else:
             assert (
                 primary._map.__props__["reflected"] == False
@@ -1027,8 +1052,12 @@ class System(object):
 
         Args:
             t (vector): An array of times at which to evaluate the flux
-                in units of :py:attr:`time_unit`.  Must have length equal
-                to the DopplerMap's :py:attr:`nt`.
+                in units of :py:attr:`time_unit`. **CRITICAL**: Must have
+                exactly :py:attr:`nt` elements, where ``nt`` is the 
+                DopplerMap's ``nt`` parameter (the number of epochs it was
+                initialized with). The DopplerMap's convolution operations
+                are compiled for a specific array size and cannot handle
+                different lengths.
             normalize (bool, optional): Normalize each epoch's spectrum
                 by the continuum level. Default is True.
             method (str, optional): Flux computation strategy forwarded to
@@ -1043,21 +1072,31 @@ class System(object):
         t_arr = self._math.reshape(
             self._math.to_array_or_tensor(t), [-1]
         )
+        
+        # CRITICAL: The DopplerMap was initialized with a specific nt,
+        # and all its convolution operations are compiled for that size.
+        # We must ensure the time array has exactly nt points.
+        if not is_tensor(t_arr):
+            if len(t_arr) != nt:
+                raise ValueError(
+                    f"Time array must have length {nt} to match the "
+                    f"DopplerMap's nt parameter. Got length {len(t_arr)}. "
+                    f"When using a DopplerMap as the primary in a System, "
+                    f"the number of time points must match the DopplerMap's nt."
+                )
+        
         t_internal = t_arr * self._time_factor
 
         # --- Rotational phase of the primary (in DopplerMap angle_unit) ---
         pri_prot = self._primary._prot
         pri_t0 = self._primary._t0
         pri_theta0 = self._primary._theta0
-        if np.allclose(float(pri_prot), 0.0):
-            theta_rad = pri_theta0 * np.ones(nt)
-        else:
-            theta_rad = (
-                (2 * np.pi) / pri_prot * (t_internal - pri_t0) + pri_theta0
-            )
+        # Compute rotational phase: theta = 2*pi*(t - t0)/prot + theta0
         # DopplerMap.flux() multiplies theta by _angle_factor internally,
         # so convert from radians to the DopplerMap's angle_unit.
-        theta = theta_rad / doppler_map._angle_factor
+        angle_factor = self._math.cast(doppler_map._angle_factor)
+        theta_rad = (2 * np.pi) / pri_prot * (t_internal - pri_t0) + pri_theta0
+        theta = theta_rad / angle_factor
 
         # --- Compute positions of all bodies (absolute, barycentric) ---
         x_abs, y_abs, z_abs = self.ops.position(
@@ -1086,16 +1125,22 @@ class System(object):
         )
         # x_abs[0] = primary, x_abs[i+1] = secondary i  (each shape ntime)
 
-        # --- Single secondary: pass positions directly ---
+        # Disconnect gradient flow through the orbital positions.
+        # The occultor positions depend on orbital parameters (porb, inc,
+        # ecc, etc.) but NOT on DopplerMap parameters (veq, map inc/obl,
+        # spectrum, y).  Disconnecting them prevents Theano from building
+        # gradient subgraphs for the exoplanet orbital ops, which avoids
+        # C compilation issues and drastically shrinks the gradient graph.
         #
-        # When the planet is far from the stellar disk the occultation
-        # math naturally computes zero correction, so we can pass the
-        # raw positions for ALL epochs (not just in-transit ones).
+        # NOTE: If in the future gradient flow through orbital parameters
+        # is needed (e.g., fitting porb/ecc alongside veq), this
+        # disconnection will need to be made conditional.
         pri_r = self._primary._r
+        _dg = theano.gradient.disconnected_grad
         if len(self._secondaries) == 1:
             sec = self._secondaries[0]
-            xo = (x_abs[1] - x_abs[0]) / pri_r
-            yo = (y_abs[1] - y_abs[0]) / pri_r
+            xo = _dg((x_abs[1] - x_abs[0]) / pri_r)
+            yo = _dg((y_abs[1] - y_abs[0]) / pri_r)
             ro = sec._r / pri_r
             return doppler_map.flux(
                 theta=theta,
@@ -1119,8 +1164,8 @@ class System(object):
         )
         flux = flux_base
         for i, sec in enumerate(self._secondaries):
-            xo_i = (x_abs[i + 1] - x_abs[0]) / pri_r
-            yo_i = (y_abs[i + 1] - y_abs[0]) / pri_r
+            xo_i = _dg((x_abs[i + 1] - x_abs[0]) / pri_r)
+            yo_i = _dg((y_abs[i + 1] - y_abs[0]) / pri_r)
             ro_i = sec._r / pri_r
             flux_occ_i = doppler_map.flux(
                 theta=theta,
