@@ -1918,11 +1918,17 @@ class OpsDoppler(OpsYlm):
             tt.zeros_like(r),
         )
 
-        # Hard-clamp ul, ll to [-1, 1] so that arcsin and (1 - u^2)^p
-        # never receive out-of-range inputs (can happen due to floating-
-        # point arithmetic even though the switch logic should prevent it).
-        ul = tt.clip(ul, -1.0, 1.0)
-        ll = tt.clip(ll, -1.0, 1.0)
+        # Hard-clamp ul, ll to (-1+eps, 1-eps).  At exactly ±1, arcsin
+        # and (1-u^2)^0.5 have infinite derivatives; Theano evaluates
+        # these per-term before combining, so the analytically finite
+        # sum  d/du[arcsin(u) + u*sqrt(1-u^2)] = 2*sqrt(1-u^2) → 0
+        # becomes inf + (-inf) = NaN in the backward pass.  Keeping
+        # ul, ll strictly inside (-1, 1) ensures all individual gradient
+        # terms stay finite.  The physical error from eps=1e-12 is
+        # negligible.
+        _eps = np.float64(1e-12)
+        ul = tt.clip(ul, -1.0 + _eps, 1.0 - _eps)
+        ll = tt.clip(ll, -1.0 + _eps, 1.0 - _eps)
 
         # Occultation integrals
         sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
