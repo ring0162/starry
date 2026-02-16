@@ -32,6 +32,9 @@ class Solve:
         self.interp = map._interp
         self.continuum_idx = map._continuum_idx
 
+        # Keep a reference to the map for calling ops
+        self._map = map
+
         # Methods and matrices
         if map.lazy:
 
@@ -57,8 +60,11 @@ class Solve:
             maxiter = tt.iscalar()
             eps = tt.dscalar()
             tol = tt.dscalar()
+            xo = tt.dvector()
+            yo = tt.dvector()
+            ro = tt.dscalar()
 
-            # Design matrix conditioned on current spectrum
+            # Design matrix conditioned on current spectrum (non-occ)
             f = map.ops.get_D_fixed_spectrum(
                 inc, obl, theta, veq, u, spectrum_
             )
@@ -68,38 +74,103 @@ class Solve:
                 [inc, obl, theta, veq, u, spectrum_],
                 f, on_unused_input="ignore",
             )
-            self._get_S = lambda: _get_S(
-                self.inc, self.obl, self.theta, self.veq, self.u,
-                self.spectrum_,
+
+            # Design matrix conditioned on current spectrum (occ)
+            f_occ = map.ops.get_D_fixed_spectrum_occ(
+                inc, obl, theta, veq, u, spectrum_, xo, yo, ro
+            )
+            if map._interp:
+                f_occ = ts.dot(map._Si2eBlk, f_occ)
+            _get_S_occ = theano.function(
+                [inc, obl, theta, veq, u, spectrum_, xo, yo, ro],
+                f_occ, on_unused_input="ignore",
             )
 
-            # Design matrix dot product conditioned on current map
+            def _get_S_dispatch():
+                if self.occultation:
+                    return _get_S_occ(
+                        self.inc, self.obl, self.theta, self.veq, self.u,
+                        self.spectrum_, self.xo, self.yo, self.ro,
+                    )
+                else:
+                    return _get_S(
+                        self.inc, self.obl, self.theta, self.veq, self.u,
+                        self.spectrum_,
+                    )
+
+            self._get_S = _get_S_dispatch
+
+            # Design matrix dot product conditioned on current map (non-occ)
             f = map.ops.dot_design_matrix_fixed_map_into(
                 inc, obl, theta, veq, u, y, x
             )
             if map._interp:
                 f = ts.dot(map._Si2eBlk, f)
-            _dotM = theano.function(
+            _dotM_noocc = theano.function(
                 [inc, obl, theta, veq, u, y, x],
                 f, on_unused_input="ignore",
             )
-            self.dotM = lambda x: _dotM(
-                self.inc, self.obl, self.theta, self.veq, self.u, self.y, x
+
+            # Design matrix dot product conditioned on current map (occ)
+            f_occ = map.ops.dot_design_matrix_fixed_map_into_occ(
+                inc, obl, theta, veq, u, y, x, xo, yo, ro
+            )
+            if map._interp:
+                f_occ = ts.dot(map._Si2eBlk, f_occ)
+            _dotM_occ = theano.function(
+                [inc, obl, theta, veq, u, y, x, xo, yo, ro],
+                f_occ, on_unused_input="ignore",
             )
 
-            # Transpose of the the above op
+            def _dotM_dispatch(x_arg):
+                if self.occultation:
+                    return _dotM_occ(
+                        self.inc, self.obl, self.theta, self.veq, self.u,
+                        self.y, x_arg, self.xo, self.yo, self.ro,
+                    )
+                else:
+                    return _dotM_noocc(
+                        self.inc, self.obl, self.theta, self.veq, self.u,
+                        self.y, x_arg,
+                    )
+
+            self.dotM = _dotM_dispatch
+
+            # Transpose of the above op (non-occ)
             f = map.ops.dot_design_matrix_fixed_map_transpose_into(
                 inc, obl, theta, veq, u, y, x
             )
             if map._interp:
                 f = ts.dot(map._Si2eBlk, f)
-            _dotMT = theano.function(
+            _dotMT_noocc = theano.function(
                 [inc, obl, theta, veq, u, y, x],
                 f, on_unused_input="ignore",
             )
-            self.dotMT = lambda x: _dotMT(
-                self.inc, self.obl, self.theta, self.veq, self.u, self.y, x
+
+            # Transpose of the above op (occ)
+            f_occ = map.ops.dot_design_matrix_fixed_map_transpose_into_occ(
+                inc, obl, theta, veq, u, y, x, xo, yo, ro
             )
+            if map._interp:
+                f_occ = ts.dot(map._Si2eBlk, f_occ)
+            _dotMT_occ = theano.function(
+                [inc, obl, theta, veq, u, y, x, xo, yo, ro],
+                f_occ, on_unused_input="ignore",
+            )
+
+            def _dotMT_dispatch(x_arg):
+                if self.occultation:
+                    return _dotMT_occ(
+                        self.inc, self.obl, self.theta, self.veq, self.u,
+                        self.y, x_arg, self.xo, self.yo, self.ro,
+                    )
+                else:
+                    return _dotMT_noocc(
+                        self.inc, self.obl, self.theta, self.veq, self.u,
+                        self.y, x_arg,
+                    )
+
+            self.dotMT = _dotMT_dispatch
 
             # Line broadening matrix
             f = map.ops.get_kT0_matrix(veq, inc)
@@ -130,30 +201,55 @@ class Solve:
             # Design matrix conditioned on current spectrum
             def _get_S():
                 map._spectrum = self.spectrum_
-                return map.design_matrix(
-                    theta=self.theta / map._angle_factor, fix_spectrum=True
-                )
+                if self.occultation:
+                    return map.design_matrix(
+                        theta=self.theta / map._angle_factor,
+                        fix_spectrum=True,
+                        xo=self.xo, yo=self.yo, ro=self.ro,
+                    )
+                else:
+                    return map.design_matrix(
+                        theta=self.theta / map._angle_factor, fix_spectrum=True
+                    )
 
             self._get_S = _get_S
 
             # Design matrix dot product conditioned on current map
             def _dotM(x):
                 map._y = self.y
-                return map.dot(
-                    x,
-                    theta=self.theta / map._angle_factor,
-                    fix_map=True,
-                    transpose=False,
-                )
+                if self.occultation:
+                    return map.dot(
+                        x,
+                        theta=self.theta / map._angle_factor,
+                        fix_map=True,
+                        transpose=False,
+                        xo=self.xo, yo=self.yo, ro=self.ro,
+                    )
+                else:
+                    return map.dot(
+                        x,
+                        theta=self.theta / map._angle_factor,
+                        fix_map=True,
+                        transpose=False,
+                    )
 
             def _dotMT(x):
                 map._y = self.y
-                return map.dot(
-                    x,
-                    theta=self.theta / map._angle_factor,
-                    fix_map=True,
-                    transpose=True,
-                )
+                if self.occultation:
+                    return map.dot(
+                        x,
+                        theta=self.theta / map._angle_factor,
+                        fix_map=True,
+                        transpose=True,
+                        xo=self.xo, yo=self.yo, ro=self.ro,
+                    )
+                else:
+                    return map.dot(
+                        x,
+                        theta=self.theta / map._angle_factor,
+                        fix_map=True,
+                        transpose=True,
+                    )
 
             self.dotM = _dotM
             self.dotMT = _dotMT
@@ -190,6 +286,12 @@ class Solve:
         self._S = None
         self._C = None
         self._KT0 = None
+
+        # Occultation state
+        self.occultation = False
+        self.xo = None
+        self.yo = None
+        self.ro = 0.0
 
         # Solution metadata
         self.meta = {}
@@ -752,6 +854,18 @@ class Solve:
         # Start fresh
         self.reset()
 
+        # Extract occultation parameters before process_inputs
+        xo = kwargs.pop("xo", None)
+        yo = kwargs.pop("yo", None)
+        ro = kwargs.pop("ro", 0.0)
+        if xo is not None:
+            self.occultation = True
+            self.xo = np.atleast_1d(np.array(xo, dtype=float))
+            if yo is None:
+                yo = np.zeros_like(self.xo)
+            self.yo = np.atleast_1d(np.array(yo, dtype=float))
+            self.ro = float(ro)
+
         # Parse the inputs
         self.process_inputs(flux, **kwargs)
         self.theta = theta
@@ -819,6 +933,18 @@ class Solve:
         # Start fresh
         self.reset()
 
+        # Extract occultation parameters before process_inputs
+        xo = kwargs.pop("xo", None)
+        yo = kwargs.pop("yo", None)
+        ro = kwargs.pop("ro", 0.0)
+        if xo is not None:
+            self.occultation = True
+            self.xo = np.atleast_1d(np.array(xo, dtype=float))
+            if yo is None:
+                yo = np.zeros_like(self.xo)
+            self.yo = np.atleast_1d(np.array(yo, dtype=float))
+            self.ro = float(ro)
+
         # Parse the inputs
         self.process_inputs(flux, **kwargs)
 
@@ -832,9 +958,15 @@ class Solve:
             tt_vars += [tt_spectrum_]
 
         # Compute the exact model
-        tt_model = self.get_flux_from_dotconv(
-            inc, obl, theta, veq, u, tt_y, tt_spectrum_
-        )
+        if self.occultation:
+            tt_model = self._map.ops.get_flux_from_dotconv_occ(
+                inc, obl, theta, veq, u, tt_y, tt_spectrum_,
+                self.xo, self.yo, self.ro,
+            )
+        else:
+            tt_model = self.get_flux_from_dotconv(
+                inc, obl, theta, veq, u, tt_y, tt_spectrum_
+            )
 
         # Interpolate to the output grid
         if self.interp:

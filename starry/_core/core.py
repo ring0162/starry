@@ -2502,6 +2502,82 @@ class OpsDoppler(OpsYlm):
         return tt.reshape(flux, (self.nt, self.nw))
 
     @autocompile
+    def get_D_fixed_spectrum_occ(
+        self, inc, obl, theta, veq, u, spectrum, xo, yo, ro
+    ):
+        """
+        Return the Doppler matrix for a fixed spectrum during an occultation.
+
+        Same as ``get_D_fixed_spectrum`` but uses the occultation kernels.
+        """
+        kT = self.get_kT_occ(inc, obl, theta, veq, u, xo, yo, ro)
+        product = tt.nnet.conv2d(
+            tt.reshape(spectrum, (self.nc, 1, 1, self.nwp)),
+            tt.reshape(kT, (self.nt * self.Ny, 1, 1, self.nk)),
+            border_mode="valid",
+            filter_flip=False,
+            input_shape=(self.nc, 1, 1, self.nwp),
+            filter_shape=(self.nt * self.Ny, 1, 1, self.nk),
+        )
+        product = tt.reshape(product, (self.nc, self.nt, self.Ny, self.nw))
+        product = tt.swapaxes(product, 1, 2)
+        product = tt.reshape(product, (self.Ny * self.nc, self.nt * self.nw))
+        product = tt.transpose(product)
+        return product
+
+    @autocompile
+    def dot_design_matrix_fixed_map_into_occ(
+        self, inc, obl, theta, veq, u, y, matrix, xo, yo, ro
+    ):
+        """
+        Dot the Doppler design matrix for a fixed Ylm map into an arbitrary
+        dense ``matrix`` during an occultation.
+
+        Same as ``dot_design_matrix_fixed_map_into`` but uses occultation
+        kernels from ``get_kT_occ``.
+        """
+        kT = self.get_kT_occ(inc, obl, theta, veq, u, xo, yo, ro)
+        kTy = tt.swapaxes(tt.dot(tt.transpose(y), kT), 0, 1)
+        if matrix.ndim == 1:
+            matrix = tt.shape_padright(matrix)
+        product = tt.nnet.conv2d(
+            tt.reshape(tt.transpose(matrix), (-1, self.nc, 1, self.nwp)),
+            tt.reshape(kTy, (self.nt, self.nc, 1, self.nk)),
+            border_mode="valid",
+            filter_flip=False,
+            input_shape=(None, self.nc, 1, self.nwp),
+            filter_shape=(self.nt, self.nc, 1, self.nk),
+        )
+        return tt.transpose(tt.reshape(product, (-1, self.nt * self.nw)))
+
+    @autocompile
+    def dot_design_matrix_fixed_map_transpose_into_occ(
+        self, inc, obl, theta, veq, u, y, matrix, xo, yo, ro
+    ):
+        """
+        Dot the transpose of the Doppler design matrix for a fixed Ylm map
+        into an arbitrary dense ``matrix`` during an occultation.
+
+        Same as ``dot_design_matrix_fixed_map_transpose_into`` but uses
+        occultation kernels from ``get_kT_occ``.
+        """
+        kT = self.get_kT_occ(inc, obl, theta, veq, u, xo, yo, ro)
+        kTy = tt.swapaxes(tt.dot(tt.transpose(y), kT), 0, 1)
+        if matrix.ndim == 1:
+            matrix = tt.shape_padright(matrix)
+        product = tt.nnet.conv2d_transpose(
+            tt.reshape(tt.transpose(matrix), (-1, self.nt, 1, self.nw)),
+            tt.reshape(kTy, (self.nt, 1, self.nc, self.nk)),
+            border_mode="valid",
+            filter_flip=False,
+            output_shape=(None, 1, self.nc, self.nwp),
+            filter_shape=(self.nt, 1, self.nc, self.nk),
+        )
+        product = tt.swapaxes(product, 2, 3)
+        product = tt.swapaxes(product, 0, 3)
+        return tt.reshape(product, (self.nc * self.nwp, -1))
+
+    @autocompile
     def L1(self, ATA, ATy, lam, maxiter, eps, tol):
         """
         L1 regularized least squares via iterated ridge (L2) regression.

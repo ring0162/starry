@@ -1176,7 +1176,10 @@ class DopplerMap:
         else:
             return matrix
 
-    def design_matrix(self, theta=None, fix_spectrum=False, fix_map=False):
+    def design_matrix(
+        self, theta=None, fix_spectrum=False, fix_map=False,
+        xo=None, yo=None, ro=0,
+    ):
         """
         Return the Doppler imaging design matrix.
 
@@ -1201,6 +1204,15 @@ class DopplerMap:
                 for a fixed map; this can then be dotted into the spectrum
                 matrix to obtain the flux. See below for details. Default is
                 False.
+            xo (vector, optional): The x position(s) of the occultor at each
+                epoch, in units of the stellar radius. Must be a vector of
+                size :py:attr:`nt`. Default is None (no occultation).
+            yo (vector, optional): The y position(s) of the occultor at each
+                epoch, in units of the stellar radius. Must be a vector of
+                size :py:attr:`nt`. Default is None (zeros if ``xo`` is
+                provided).
+            ro (float, optional): The radius of the occultor in units of the
+                stellar radius. Default is 0.
 
         If ``fix_spectrum`` and ``fix_map`` are False (default), this method
         returns a sparse matrix of shape
@@ -1245,25 +1257,54 @@ class DopplerMap:
             fix_spectrum and fix_map
         ), "Cannot fix both the spectrum and the map."
 
+        occultation = xo is not None
+
+        if occultation:
+            if yo is None:
+                yo = np.zeros(self._nt)
+            elif np.ndim(yo) == 0:
+                yo = np.ones(self._nt) * yo
+            xo, yo, ro = self._math.cast(xo, yo, ro)
+
         # Compute the Doppler operator
         if fix_spectrum:
 
-            # Fixed spectrum (dense)
-            D = self.ops.get_D_fixed_spectrum(
-                self._inc, self._obl, theta, self._veq, self._u, self._spectrum
-            )
+            if occultation:
+                D = self.ops.get_D_fixed_spectrum_occ(
+                    self._inc, self._obl, theta, self._veq, self._u,
+                    self._spectrum, xo, yo, ro,
+                )
+            else:
+                D = self.ops.get_D_fixed_spectrum(
+                    self._inc, self._obl, theta, self._veq, self._u,
+                    self._spectrum,
+                )
 
         elif fix_map:
 
-            # Fixed map (dense)
-            D = self.ops.get_D_fixed_map(
-                self._inc, self._obl, theta, self._veq, self._u, self._y
-            )
+            if occultation:
+                raise NotImplementedError(
+                    "Occultation design matrix with fix_map is not yet "
+                    "supported. Use fix_spectrum=True instead."
+                )
+            else:
+                # Fixed map (dense)
+                D = self.ops.get_D_fixed_map(
+                    self._inc, self._obl, theta, self._veq, self._u, self._y
+                )
 
         else:
 
-            # Full matrix (sparse)
-            D = self.ops.get_D(self._inc, self._obl, theta, self._veq, self._u)
+            if occultation:
+                raise NotImplementedError(
+                    "Full occultation design matrix is not yet supported. "
+                    "Use fix_spectrum=True instead."
+                )
+            else:
+                # Full matrix (sparse)
+                D = self.ops.get_D(
+                    self._inc, self._obl, theta, self._veq, self._u
+                )
 
         # Interpolate to the output grid
         if self._interp:
@@ -1413,7 +1454,8 @@ class DopplerMap:
         return baseline
 
     def dot(
-        self, x, theta=None, transpose=False, fix_spectrum=False, fix_map=False
+        self, x, theta=None, transpose=False, fix_spectrum=False, fix_map=False,
+        xo=None, yo=None, ro=0,
     ):
         """
         Dot the Doppler design matrix into a given matrix or vector.
@@ -1491,6 +1533,15 @@ class DopplerMap:
             fix_spectrum and fix_map
         ), "Cannot fix both the spectrum and the map."
 
+        occultation = xo is not None
+
+        if occultation:
+            if yo is None:
+                yo = np.zeros(self._nt)
+            elif np.ndim(yo) == 0:
+                yo = np.ones(self._nt) * yo
+            xo, yo, ro = self._math.cast(xo, yo, ro)
+
         if transpose:
 
             # Interpolate from `wav` to `wav_` at each epoch
@@ -1500,21 +1551,38 @@ class DopplerMap:
             if fix_spectrum:
 
                 # This is inherently fast -- no need for a special Op
-                D = self.ops.get_D_fixed_spectrum(
-                    self._inc, self._obl, theta, self._veq, self._u,
-                    self._spectrum,
-                )
+                if occultation:
+                    D = self.ops.get_D_fixed_spectrum_occ(
+                        self._inc, self._obl, theta, self._veq, self._u,
+                        self._spectrum, xo, yo, ro,
+                    )
+                else:
+                    D = self.ops.get_D_fixed_spectrum(
+                        self._inc, self._obl, theta, self._veq, self._u,
+                        self._spectrum,
+                    )
                 product = self._math.dot(self._math.transpose(D), x)
 
             elif fix_map:
 
-                product = self.ops.dot_design_matrix_fixed_map_transpose_into(
-                    self._inc, self._obl, theta, self._veq, self._u,
-                    self._y, x,
-                )
+                if occultation:
+                    product = self.ops.dot_design_matrix_fixed_map_transpose_into_occ(
+                        self._inc, self._obl, theta, self._veq, self._u,
+                        self._y, x, xo, yo, ro,
+                    )
+                else:
+                    product = self.ops.dot_design_matrix_fixed_map_transpose_into(
+                        self._inc, self._obl, theta, self._veq, self._u,
+                        self._y, x,
+                    )
 
             else:
 
+                if occultation:
+                    raise NotImplementedError(
+                        "Occultation dot with full design matrix is not yet "
+                        "supported. Use fix_spectrum or fix_map instead."
+                    )
                 product = self.ops.dot_design_matrix_transpose_into(
                     self._inc, self._obl, theta, self._veq, self._u, x
                 )
@@ -1524,21 +1592,38 @@ class DopplerMap:
             if fix_spectrum:
 
                 # This is inherently fast -- no need for a special Op
-                D = self.ops.get_D_fixed_spectrum(
-                    self._inc, self._obl, theta, self._veq, self._u,
-                    self._spectrum,
-                )
+                if occultation:
+                    D = self.ops.get_D_fixed_spectrum_occ(
+                        self._inc, self._obl, theta, self._veq, self._u,
+                        self._spectrum, xo, yo, ro,
+                    )
+                else:
+                    D = self.ops.get_D_fixed_spectrum(
+                        self._inc, self._obl, theta, self._veq, self._u,
+                        self._spectrum,
+                    )
                 product = self._math.dot(D, x)
 
             elif fix_map:
 
-                product = self.ops.dot_design_matrix_fixed_map_into(
-                    self._inc, self._obl, theta, self._veq, self._u,
-                    self._y, x,
-                )
+                if occultation:
+                    product = self.ops.dot_design_matrix_fixed_map_into_occ(
+                        self._inc, self._obl, theta, self._veq, self._u,
+                        self._y, x, xo, yo, ro,
+                    )
+                else:
+                    product = self.ops.dot_design_matrix_fixed_map_into(
+                        self._inc, self._obl, theta, self._veq, self._u,
+                        self._y, x,
+                    )
 
             else:
 
+                if occultation:
+                    raise NotImplementedError(
+                        "Occultation dot with full design matrix is not yet "
+                        "supported. Use fix_spectrum or fix_map instead."
+                    )
                 product = self.ops.dot_design_matrix_into(
                     self._inc, self._obl, theta, self._veq, self._u, x
                 )
@@ -1832,7 +1917,7 @@ class DopplerMap:
         self._map[:, :] = self._y[:, n]
         return self._map.intensity(**kwargs)
 
-    def solve(self, flux, solver="bilinear", **kwargs):
+    def solve(self, flux, solver="bilinear", xo=None, yo=None, ro=0, **kwargs):
         """
         Iteratively solves the bilinear or nonlinear problem for the spatial
         and/or spectral map given a spectral timeseries.
@@ -1842,6 +1927,17 @@ class DopplerMap:
                 of shape (py:attr:`nt`, py:attr:`nw`).
             solver (str, optional): Which solver to use. Options are "bilinear"
                 or "nonlinear". Default is "bilinear".
+            xo (vector, optional): The x position(s) of the occultor at each
+                epoch, in units of the stellar radius. Must be a vector of
+                size :py:attr:`nt`. When provided, the solver accounts for the
+                transit signal (Rossiter-McLaughlin effect) in the design
+                matrix. Default is None (no occultation).
+            yo (vector, optional): The y position(s) of the occultor at each
+                epoch, in units of the stellar radius. Must be a vector of
+                size :py:attr:`nt`. Default is None (zeros if ``xo`` is
+                provided).
+            ro (float, optional): The radius of the occultor in units of the
+                stellar radius. Default is 0.
             flux_err (float, vector, or matrix, optional): The data
                 uncertainty. If a scalar, the data is assumed to be
                 homoscedastic. If a vector, the data for each epoch is assumed
@@ -1963,6 +2059,14 @@ class DopplerMap:
                 Default is False.
 
         """
+        # Handle occultation parameters: evaluate if lazy, then inject
+        # into kwargs for the solver
+        if xo is not None:
+            if yo is None:
+                yo = np.zeros(self._nt)
+            elif np.ndim(yo) == 0:
+                yo = np.ones(self._nt) * yo
+
         if self.lazy:
 
             # We need to ensure all the inputs are
@@ -1981,6 +2085,10 @@ class DopplerMap:
             for key in kwargs.keys():
                 if key not in ["point", "model"]:
                     kwargs[key] = get_val(kwargs[key])
+            if xo is not None:
+                xo = get_val(xo)
+                yo = get_val(yo)
+                ro = get_val(ro) if is_tensor(ro) else float(ro)
 
         else:
 
@@ -1991,6 +2099,12 @@ class DopplerMap:
             inc = self._inc  # rad
             obl = self._obl  # rad
             theta = self._get_default_theta(kwargs.pop("theta", None))  # rad
+
+        # Inject occultation params into kwargs for the solver
+        if xo is not None:
+            kwargs["xo"] = xo
+            kwargs["yo"] = yo
+            kwargs["ro"] = ro
 
         # Run the solver
         if solver.lower().startswith("bi"):
