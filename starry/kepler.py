@@ -465,23 +465,27 @@ class System(object):
             self._reflected = False
 
             # The combined gradient graph (exoplanet orbital ops +
-            # DopplerMap convolution/occultation ops) can be large.
-            # Theano's default "fast_run" optimizer aggressively fuses
-            # element-wise ops into a single C function that may exceed
-            # the compiler's limits.  Rather than downgrading the entire
-            # optimizer to "fast_compile" (which disables constant folding,
-            # in-place rewrites, etc. and slows sampling considerably),
-            # we keep "fast_run" but exclude the fusion pass.
+            # DopplerMap convolution/occultation ops) is too large for
+            # Theano's default "fast_run" optimizer: the aggressive
+            # element-wise fusion produces a single C function that
+            # exceeds the compiler's limits.  Switching to "fast_compile"
+            # keeps individual C ops (so CorrMM etc. still work) but
+            # skips the fusion pass that causes the explosion.
+            #
+            # We must also clear the cached default mode so that
+            # theano.function() (including calls from PyMC3) picks up
+            # the new optimizer setting.
             if self._lazy:
                 import theano.compile.mode as _tcm
 
-                _mode = theano.compile.get_default_mode()
-                _mode = _mode.excluding("fusion")
-                _tcm.instantiated_default_mode = _mode
+                theano.config.mode = "Mode"
+                theano.config.optimizer = "fast_compile"
+                theano.config.linker = "cvm"
+                _tcm.instantiated_default_mode = None
                 logger.info(
-                    "DopplerMap System: using theano default mode with "
-                    "element-wise fusion excluded to avoid C "
-                    "compilation failures in the gradient graph."
+                    "DopplerMap System: forced theano default mode to "
+                    "Mode(linker='cvm', optimizer='fast_compile') to "
+                    "avoid C compilation failures in the gradient graph."
                 )
         else:
             assert (
