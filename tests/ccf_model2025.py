@@ -1,16 +1,13 @@
 
-# os.environ['THEANO_FLAGS'] = 'cxx=/usr/bin/clang++,optimizer=fast_compile,exception_verbosity=high'
 import sys
 sys.setrecursionlimit(50000)  # Default is 1000, increase to 10000
 print(f"Recursion limit: {sys.getrecursionlimit()}")
 
 import os
 os.environ['THEANO_FLAGS'] = 'exception_verbosity=high'
-os.environ['THEANO_FLAGS'] = 'optimizer=None'
 
 import theano
 theano.config.exception_verbosity = 'high'
-theano.config.optimizer = 'None'
 import pandas as pd
 import matplotlib.pyplot as plt
 import pickle
