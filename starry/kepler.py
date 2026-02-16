@@ -475,13 +475,12 @@ class System(object):
             if self._lazy:
                 import theano.compile.mode as _tcm
 
-                theano.config.optimizer = "fast_run"
-                theano.config.optimizer_excluding = "fusion"
-                theano.config.linker = "cvm"
-                _tcm.instantiated_default_mode = None
+                _mode = theano.compile.get_default_mode()
+                _mode = _mode.excluding("fusion")
+                _tcm.instantiated_default_mode = _mode
                 logger.info(
-                    "DopplerMap System: using theano optimizer 'fast_run' "
-                    "with element-wise fusion excluded to avoid C "
+                    "DopplerMap System: using theano default mode with "
+                    "element-wise fusion excluded to avoid C "
                     "compilation failures in the gradient graph."
                 )
         else:
