@@ -552,6 +552,9 @@ def compute_quadrature_spectra(
         "theta":        thetas,
         "utc_hours":    utc_hours,
         "utc_labels":   utc_labels,
+        # Keep specmap and geometry for downstream rendering
+        "specmap":      specmap,
+        "xs": xs, "ys": ys, "zs": zs, "rs": rs,
     }
 
 
@@ -604,6 +607,234 @@ def plot_spectra(result: dict, save_path: str | None = None) -> plt.Figure:
     return fig
 
 
+def _render_disk_rgb(
+    specmap,
+    wav:   np.ndarray,
+    theta: float,
+    xs: float, ys: float, zs: float, rs: float,
+    res:   int = 150,
+) -> np.ndarray:
+    """
+    Render a single RGB disk image of the planet using starry's render method.
+
+    The spectral map is sampled at three wavelengths representing the blue
+    (450 nm), green (550 nm), and red (700 nm) channels.  These lie within
+    the 300–1000 nm simulation range and span the spectral features of
+    interest (ocean absorption, VRE).
+
+    Parameters
+    ----------
+    specmap : starry.Map
+        Spectral map returned by SpectralMap.get_specmap().
+    wav : ndarray
+        Wavelength grid in microns.
+    theta : float
+        Map rotation angle in degrees for this observation epoch.
+    xs, ys, zs, rs : float
+        Star position (Rp units) and radius (Rp).
+    res : int
+        Pixel resolution of the output square image.
+
+    Returns
+    -------
+    rgb : ndarray, float32, shape (res, res, 3)
+        sRGB image in [0, 1].  Off-disk pixels are 0.  The image uses
+        the same orientation as starry renders: north is up when obl=0.
+    """
+    wav = np.asarray(wav)
+
+    # ── Select wavelength indices for B / G / R channels ────────────────────
+    wav_bgr_um = [0.45, 0.55, 0.70]      # blue, green, red  [μm]
+    idx_bgr    = [int(np.argmin(np.abs(wav - w))) for w in wav_bgr_um]
+
+    try:
+        # specmap.render() for a spectral map (nw > 1) returns (nw, res, res)
+        cube = np.array(
+            specmap.render(theta=theta, xs=xs, ys=ys, zs=zs, rs=rs, res=res),
+            dtype=np.float64,
+        )
+
+        if cube.ndim == 3:
+            # (nwav, res, res) — expected for spectral map
+            b = cube[idx_bgr[0]]
+            g = cube[idx_bgr[1]]
+            r = cube[idx_bgr[2]]
+        elif cube.ndim == 2:
+            # Scalar map fallback: replicate as grey
+            b = g = r = cube
+        else:
+            raise ValueError(f"Unexpected render shape {cube.shape}")
+
+    except Exception as exc:
+        print(f"\n  [disk render failed: {exc}]")
+        return np.zeros((res, res, 3), dtype=np.float32)
+
+    # ── Assemble (res, res, 3) in R-G-B order ────────────────────────────────
+    rgb = np.dstack([r, g, b]).astype(np.float32)
+
+    # ── Normalise: scale all channels together to preserve colour ratios ─────
+    illuminated = rgb[rgb > 0]
+    vmax = float(np.nanpercentile(illuminated, 99.5)) if illuminated.size else 1.0
+    rgb  = np.clip(rgb / max(vmax, 1e-10), 0.0, 1.0)
+
+    # ── Gamma correction (sRGB γ ≈ 0.45) for perceptually linear display ─────
+    rgb = np.power(np.maximum(rgb, 0.0), 0.45).astype(np.float32)
+
+    # ── Set off-disk pixels to black ─────────────────────────────────────────
+    rgb = np.nan_to_num(rgb, nan=0.0)
+
+    return rgb
+
+
+def plot_disks_and_spectra(
+    result:   dict,
+    save_path: str | None = None,
+    disk_res:  int = 150,
+) -> plt.Figure:
+    """
+    Validation figure replicating the style of Kofman et al. (2024) Figure 5:
+
+    - **Top row** : rendered RGB disk of the planet at each of the 9 UTC
+      snapshots, showing the illuminated hemisphere and surface geography as
+      modelled by the starry SH map.
+    - **Bottom panel** : normalised albedo spectra (one line per UTC time).
+
+    Each disk is rendered using :func:`_render_disk_rgb` at B / G / R
+    wavelengths so that ocean (dark blue), land (brownish), and snow/cloud
+    (white) are visually distinguishable.  The UTC time and sub-stellar
+    longitude are annotated above and below each disk.
+
+    Parameters
+    ----------
+    result : dict
+        Return value of :func:`compute_quadrature_spectra`.  Must contain
+        the ``'specmap'`` key (present when called from the standard
+        workflow).
+    save_path : str, optional
+        File path for the saved figure (PNG / PDF).  If ``None``, the
+        figure is returned but not saved.
+    disk_res : int
+        Pixel resolution for each disk render.  150 is a good balance
+        between quality and speed (~5–15 s per render on a laptop CPU).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    specmap = result["specmap"]
+    wav     = result["wav"]
+    xs, ys, zs, rs = result["xs"], result["ys"], result["zs"], result["rs"]
+    n       = len(result["utc_labels"])
+    thetas  = result["theta"]
+    labels  = result["utc_labels"]
+    lons    = result["subsolar_lon"]
+    wav_nm  = wav * 1000.0              # μm → nm
+
+    # ── Render all disk images ────────────────────────────────────────────────
+    print(f"\nRendering {n} disk images (res={disk_res}) …")
+    disks = []
+    for theta, lbl in zip(thetas, labels):
+        print(f"  {lbl} UTC  (θ={theta:+.1f}°) …", end=" ", flush=True)
+        disks.append(
+            _render_disk_rgb(specmap, wav, theta, xs, ys, zs, rs, res=disk_res)
+        )
+        print("done")
+
+    # ── Per-UTC colours (plasma palette, matching plot_spectra) ───────────────
+    colors = plt.cm.plasma(np.linspace(0.10, 0.92, n))
+
+    # ── Figure layout ─────────────────────────────────────────────────────────
+    # Top band: n disks side-by-side.  Bottom band: spectra panel.
+    fig = plt.figure(figsize=(14, 7.5), facecolor="black")
+
+    disk_h   = 0.37          # fraction of figure height for disk row
+    disk_top = 0.97
+    disk_bot = disk_top - disk_h
+    w_each   = 1.0 / n
+    pad      = 0.003          # horizontal padding between disks
+
+    ax_disks = [
+        fig.add_axes(
+            [i * w_each + pad, disk_bot, w_each - 2 * pad, disk_h],
+            facecolor="black",
+        )
+        for i in range(n)
+    ]
+
+    # Bottom spectra panel (leaves room for axis labels)
+    ax_spec = fig.add_axes([0.07, 0.055, 0.91, 0.32], facecolor="#080808")
+
+    # ── Off-disk mask for circular boundary ───────────────────────────────────
+    xi = np.linspace(-1, 1, disk_res)
+    xx, yy = np.meshgrid(xi, xi)
+    off_disk = (xx ** 2 + yy ** 2) > 1.0
+
+    # ── Draw disks ────────────────────────────────────────────────────────────
+    for i, (ax, rgb, lbl, lon) in enumerate(
+        zip(ax_disks, disks, labels, lons)
+    ):
+        img = rgb.copy()
+        img[off_disk] = 0.0          # enforce circular boundary
+
+        ax.imshow(
+            img, origin="upper", interpolation="bilinear",
+            extent=[-1, 1, -1, 1], aspect="equal",
+        )
+        ax.set_xlim(-1.12, 1.12)
+        ax.set_ylim(-1.12, 1.12)
+        ax.set_facecolor("black")
+        ax.set_xticks([]); ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+
+        # UTC label above the disk
+        ax.text(
+            0, 1.10, lbl,
+            transform=ax.transData, ha="center", va="bottom",
+            fontsize=9, fontweight="bold", color=colors[i],
+        )
+        # Sub-stellar longitude below the disk
+        ax.text(
+            0, -1.10, f"{lon:+.0f}°",
+            transform=ax.transData, ha="center", va="top",
+            fontsize=7, color="0.50",
+        )
+
+    # ── Draw spectra ──────────────────────────────────────────────────────────
+    albedo = result["albedo"]
+    for i in range(n):
+        ax_spec.plot(
+            wav_nm, albedo[i],
+            color=colors[i], lw=1.4,
+            label=f"{labels[i]}  ({lons[i]:+.0f}°)",
+        )
+
+    ax_spec.axvspan(700, 760, alpha=0.10, color="limegreen", label="VRE")
+    ax_spec.set_xlabel("Wavelength  [nm]",        fontsize=10, color="0.70")
+    ax_spec.set_ylabel("Relative albedo",          fontsize=10, color="0.70")
+    ax_spec.tick_params(colors="0.55", labelsize=8)
+    for sp in ax_spec.spines.values():
+        sp.set_color("0.25")
+    ax_spec.set_xlim(wav_nm[0], wav_nm[-1])
+    ax_spec.set_ylim(bottom=0)
+    ax_spec.legend(
+        fontsize=6.5, ncol=3, loc="upper right",
+        facecolor="#0e0e0e", edgecolor="0.25", labelcolor="0.75",
+    )
+    ax_spec.grid(alpha=0.12, color="0.35")
+    ax_spec.set_title(
+        "Earth reflection spectra at quadrature — summer solstice 2022"
+        "   ·   starry SH model   (Kofman et al. 2024 analog)",
+        fontsize=9, color="0.65", pad=6,
+    )
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="black")
+        print(f"Figure saved → {save_path}")
+
+    return fig
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Entry point
 # ══════════════════════════════════════════════════════════════════════════════
@@ -639,6 +870,14 @@ if __name__ == "__main__":
         "--clouds", action="store_true", default=False,
         help="Enable stochastic cloud patches (default: cloud-free).",
     )
+    parser.add_argument(
+        "--disk-res", type=int, default=150, metavar="N",
+        help="Pixel resolution for the rendered disk images in the validation plot.",
+    )
+    parser.add_argument(
+        "--no-disks", action="store_true", default=False,
+        help="Skip the disk-rendering step (faster; produces spectra-only plot).",
+    )
     _args = parser.parse_args()
 
     # ── wavelength grid: R=70, 300–1000 nm (matches paper's HWO simulations)
@@ -667,7 +906,7 @@ if __name__ == "__main__":
         map_source     = _args.map,
     )
 
-    # ── Save ────────────────────────────────────────────────────────────────
+    # ── Save arrays ──────────────────────────────────────────────────────────
     os.makedirs(_args.output_dir, exist_ok=True)
     np.save(os.path.join(_args.output_dir, "earth_kofman_flux.npy"),    result_cf["flux"])
     np.save(os.path.join(_args.output_dir, "earth_kofman_albedo.npy"),  result_cf["albedo"])
@@ -688,8 +927,17 @@ if __name__ == "__main__":
             f"{result_cf['albedo'][i].max():>10.5f}"
         )
 
-    # ── Plot ─────────────────────────────────────────────────────────────────
-    fig = plot_spectra(
+    # ── Validation figure: disks + spectra ───────────────────────────────────
+    if not _args.no_disks:
+        fig_val = plot_disks_and_spectra(
+            result_cf,
+            save_path=os.path.join(_args.output_dir, "earth_kofman_validation.png"),
+            disk_res=_args.disk_res,
+        )
+        plt.figure(fig_val.number)
+
+    # ── Spectra-only plot (quick look) ────────────────────────────────────────
+    fig_spec = plot_spectra(
         result_cf,
         save_path=os.path.join(_args.output_dir, "earth_kofman_spectra.png"),
     )
