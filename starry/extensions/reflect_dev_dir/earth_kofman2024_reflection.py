@@ -397,6 +397,7 @@ def compute_quadrature_spectra(
     include_clouds: bool  = False,
     include_snow:   bool  = True,
     plot_scalar:    bool  = False,
+    map_source:     "str | SpectralMap | None" = None,
 ) -> dict:
     """
     Compute disk-integrated reflected spectra for the 9 Earth orientations
@@ -417,9 +418,21 @@ def compute_quadrature_spectra(
         True  → cloudy case (paper's right panel; uses stochastic patches
                  rather than MERRA-2; see DATA ACQUISITION NOTES).
     include_snow : bool
-        Include polar ice caps.
+        Include polar ice caps.  Ignored when ``map_source`` is a path or
+        a pre-built :class:`SpectralMap` (snow is baked into the map already).
     plot_scalar : bool
         Show the scalar (0.7 μm) map after loading.
+    map_source : str or SpectralMap or None
+        Controls which surface map is used:
+
+        * ``None`` (default) — build from cartopy Natural Earth coastlines
+          (or geometric fallback if cartopy is unavailable).  Fast but low
+          fidelity.
+        * ``str`` path to a ``.nc`` file written by
+          ``kofman2024_surface_map.py --output map.nc`` — load real MODIS
+          land cover + snow/ice.  Recommended for paper-quality results.
+        * A pre-built :class:`SpectralMap` instance — used directly, no
+          map building step is run at all.
 
     Returns
     -------
@@ -443,12 +456,30 @@ def compute_quadrature_spectra(
     utc_hours = np.asarray(utc_hours, dtype=float)
     n = len(utc_hours)
 
-    # ── build spectral map ─────────────────────────────────────────────────
-    smap    = build_earth_spectralmap(
-        wav, ydeg=ydeg,
-        include_clouds=include_clouds,
-        include_snow=include_snow,
-    )
+    # ── build / load spectral map ──────────────────────────────────────────
+    if map_source is None:
+        # Cartopy / geometric fallback
+        smap = build_earth_spectralmap(
+            wav, ydeg=ydeg,
+            include_clouds=include_clouds,
+            include_snow=include_snow,
+        )
+    elif isinstance(map_source, str):
+        # Path to a NetCDF4 file from kofman2024_surface_map.py
+        from starry.extensions.reflect_dev_dir.kofman2024_surface_map import (
+            build_spectralmap_from_modis,
+        )
+        smap = build_spectralmap_from_modis(
+            wav,
+            map_path=map_source,
+            ydeg=ydeg,
+            smoothing=1.5,
+            roughness=0.0,
+        )
+    else:
+        # Assume it is already a SpectralMap
+        smap = map_source
+
     specmap = smap.get_specmap(plot_scalar=plot_scalar)
 
     # ── set summer-solstice obliquity ──────────────────────────────────────
@@ -578,6 +609,37 @@ def plot_spectra(result: dict, save_path: str | None = None) -> plt.Figure:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    import argparse
+
+    _HERE_MAIN = os.path.dirname(os.path.abspath(__file__))
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compute 9 Earth reflection spectra at quadrature (Kofman 2024 analog)."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--map", metavar="FILE.nc", default=None,
+        help=(
+            "Path to a surface map NetCDF4 file produced by "
+            "kofman2024_surface_map.py.  If omitted, falls back to a "
+            "cartopy / geometric land mask."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir", "-o", metavar="DIR", default=_HERE_MAIN,
+        help="Directory for output .npy and .png files.",
+    )
+    parser.add_argument(
+        "--ydeg", type=int, default=20,
+        help="Spherical-harmonic degree for SpectralMap.",
+    )
+    parser.add_argument(
+        "--clouds", action="store_true", default=False,
+        help="Enable stochastic cloud patches (default: cloud-free).",
+    )
+    _args = parser.parse_args()
 
     # ── wavelength grid: R=70, 300–1000 nm (matches paper's HWO simulations)
     wav = wav_grid_from_R(R=70, wav_min=0.30, wav_max=1.00)
@@ -590,25 +652,27 @@ if __name__ == "__main__":
     print(f"  Star pos  : xs = {DIST_RP:.0f} Rp  (1 AU),  "
           f"rs = {RS_RP:.1f} Rp  (1 R_sun)")
     print(f"  Obliquity : {OBL_EARTH}°  (summer solstice, pole toward +x star)")
-    print(f"  Clouds    : disabled for cloud-free run  (set include_clouds=True)")
+    print(f"  Map source: {_args.map if _args.map else 'cartopy / geometric fallback'}")
+    print(f"  Clouds    : {'enabled (stochastic)' if _args.clouds else 'disabled (cloud-free)'}")
     print()
 
     # ── Cloud-free case (reproduces paper's left panel of Figure 5) ─────────
     result_cf = compute_quadrature_spectra(
         wav            = wav,
         utc_hours      = UTC_HOURS,
-        ydeg           = 20,
-        include_clouds = False,   # cloud-free
+        ydeg           = _args.ydeg,
+        include_clouds = _args.clouds,
         include_snow   = True,
         plot_scalar    = False,
+        map_source     = _args.map,
     )
 
     # ── Save ────────────────────────────────────────────────────────────────
-    out_dir = os.path.dirname(os.path.abspath(__file__))
-    np.save(os.path.join(out_dir, "earth_kofman_flux.npy"),    result_cf["flux"])
-    np.save(os.path.join(out_dir, "earth_kofman_albedo.npy"),  result_cf["albedo"])
-    np.save(os.path.join(out_dir, "earth_kofman_wav.npy"),     result_cf["wav"])
-    print("\nArrays saved → earth_kofman_{flux,albedo,wav}.npy")
+    os.makedirs(_args.output_dir, exist_ok=True)
+    np.save(os.path.join(_args.output_dir, "earth_kofman_flux.npy"),    result_cf["flux"])
+    np.save(os.path.join(_args.output_dir, "earth_kofman_albedo.npy"),  result_cf["albedo"])
+    np.save(os.path.join(_args.output_dir, "earth_kofman_wav.npy"),     result_cf["wav"])
+    print(f"\nArrays saved → {_args.output_dir}/earth_kofman_{{flux,albedo,wav}}.npy")
 
     # ── Summary table ────────────────────────────────────────────────────────
     print("\n── Summary ──────────────────────────────────────────────────────")
@@ -627,7 +691,7 @@ if __name__ == "__main__":
     # ── Plot ─────────────────────────────────────────────────────────────────
     fig = plot_spectra(
         result_cf,
-        save_path=os.path.join(out_dir, "earth_kofman_spectra.png"),
+        save_path=os.path.join(_args.output_dir, "earth_kofman_spectra.png"),
     )
     plt.show()
 

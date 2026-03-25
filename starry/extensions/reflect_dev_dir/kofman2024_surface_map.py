@@ -646,6 +646,7 @@ def build_map_image(
 def build_spectralmap_from_modis(
     wav: "np.ndarray",
     *,
+    map_path:   Optional[str] = None,
     land_fracs: Optional[dict[str, np.ndarray]] = None,
     snow_mask:  Optional[np.ndarray] = None,
     data_paths: Optional[dict[str, str]] = None,
@@ -659,24 +660,33 @@ def build_spectralmap_from_modis(
     End-to-end convenience function: process MODIS/NSIDC data and return a
     fully configured :class:`SpectralMap` with the real snow mask injected.
 
-    If ``land_fracs`` or ``snow_mask`` are already computed (e.g. from a
-    previous run or from saved ``.npy`` files), pass them directly to skip
-    the expensive MODIS I/O.
+    If a previously saved NetCDF4 map file is available, pass ``map_path``
+    to load it directly (fastest).  Otherwise supply pre-computed
+    ``land_fracs`` / ``snow_mask`` arrays, or leave both ``None`` to run the
+    full MODIS I/O pipeline from scratch.
 
     Parameters
     ----------
     wav : ndarray
         Wavelength grid in microns (passed to SpectralMap).
+    map_path : str, optional
+        Path to a ``.nc`` file written by :func:`save_map`.  If supplied,
+        ``land_fracs`` and ``snow_mask`` are loaded from it directly and the
+        raw MODIS HDF4 files are not needed.
     land_fracs : dict, optional
-        Pre-computed output of :func:`process_mcd12c1`.
+        Pre-computed output of :func:`process_mcd12c1`.  Ignored if
+        ``map_path`` is given.
     snow_mask : ndarray, optional
-        Pre-computed output of :func:`process_snow_ice`.
+        Pre-computed output of :func:`process_snow_ice`.  Ignored if
+        ``map_path`` is given.
     data_paths : dict, optional
-        Override data-file paths.  Defaults to :func:`get_data_paths`.
+        Override raw data-file paths.  Defaults to :func:`get_data_paths`.
+        Only used when ``map_path`` is ``None`` and arrays must be derived
+        from the original HDF4/NetCDF files.
     snow_threshold : int
-        Passed to :func:`process_snow_ice`.
+        Passed to :func:`process_snow_ice` (only when running full pipeline).
     target_date : datetime.date
-        NSIDC weekly snapshot selection.
+        NSIDC weekly snapshot selection (only when running full pipeline).
     ydeg : int
         Spherical-harmonic degree for SpectralMap.
     smoothing : float
@@ -693,21 +703,21 @@ def build_spectralmap_from_modis(
         - Continental spectrum from reflect_dev_dir ASTER library
         - Ocean spectrum from seawater USGS+ASTER
 
-    Usage example
-    -------------
-    ::
+    Usage examples
+    --------------
+    From a saved NetCDF4 map (recommended — fast)::
 
-        import os
-        os.environ["KOFMAN_DATA_DIR"] = "/Volumes/AndrewEXT/kofman2024_inputdata"
-
-        from starry.extensions.reflect_dev_dir import wav_grid_from_R
         from starry.extensions.reflect_dev_dir.kofman2024_surface_map import (
             build_spectralmap_from_modis
         )
-
         wav  = wav_grid_from_R(R=70, wav_min=0.30, wav_max=1.00)
+        smap = build_spectralmap_from_modis(wav, map_path="kofman_surface_map.nc")
+
+    From raw MODIS files (slow — ~10 min for MCD12C1)::
+
+        import os
+        os.environ["KOFMAN_DATA_DIR"] = "/Volumes/AndrewEXT/kofman2024_inputdata"
         smap = build_spectralmap_from_modis(wav)
-        specmap = smap.get_specmap(plot_scalar=False)
     """
     # ── Lazy imports (starry and its deps only needed at call time) ──────────
     from starry.extensions.reflect_dev_dir.reflect import (
@@ -721,24 +731,28 @@ def build_spectralmap_from_modis(
     except ImportError as exc:
         raise ImportError("spectres required — pip install spectres") from exc
 
-    # ── Resolve data files ───────────────────────────────────────────────────
-    if data_paths is None:
-        data_paths = get_data_paths()
+    # ── Fast path: load pre-built NetCDF4 map ────────────────────────────────
+    if map_path is not None:
+        print(f"\n── Loading surface map from {os.path.basename(map_path)} …")
+        land_fracs, snow_mask, _ = load_map(map_path)
 
-    # ── Compute land fractions if not supplied ───────────────────────────────
-    if land_fracs is None:
-        print("\n── Step 1/3: Land cover (MCD12C1) ──────────────────────────")
-        land_fracs = process_mcd12c1(data_paths["mcd12c1"])
+    # ── Slow path: derive from raw MODIS/NSIDC files ─────────────────────────
+    else:
+        if data_paths is None:
+            data_paths = get_data_paths()
 
-    # ── Compute snow mask if not supplied ────────────────────────────────────
-    if snow_mask is None:
-        print("\n── Step 2/3: Snow / sea-ice mask ────────────────────────────")
-        snow_mask = process_snow_ice(
-            data_paths["mod10cm"],
-            data_paths["nsidc_ice"],
-            snow_threshold=snow_threshold,
-            target_date=target_date,
-        )
+        if land_fracs is None:
+            print("\n── Step 1/3: Land cover (MCD12C1) ──────────────────────────")
+            land_fracs = process_mcd12c1(data_paths["mcd12c1"])
+
+        if snow_mask is None:
+            print("\n── Step 2/3: Snow / sea-ice mask ────────────────────────────")
+            snow_mask = process_snow_ice(
+                data_paths["mod10cm"],
+                data_paths["nsidc_ice"],
+                snow_threshold=snow_threshold,
+                target_date=target_date,
+            )
 
     # ── Build map_image ──────────────────────────────────────────────────────
     print("\n── Step 3/3: Building map_image ─────────────────────────────")
@@ -793,60 +807,205 @@ def build_spectralmap_from_modis(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Caching helpers  (save / load processed arrays to avoid re-running I/O)
+#  NetCDF4 save / load  (primary persistent format)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def save_processed(
-    land_fracs: dict[str, np.ndarray],
-    snow_mask:  np.ndarray,
-    out_dir:    str = ".",
+def save_map(
+    land_fracs:  dict[str, np.ndarray],
+    snow_mask:   np.ndarray,
+    out_path:    str,
+    *,
+    snow_threshold: int           = 50,
+    target_date:    datetime.date = datetime.date(2022, 6, 21),
+    source_files:   Optional[dict[str, str]] = None,
 ) -> None:
     """
-    Save the processed arrays as compressed .npz files so MODIS I/O only
-    needs to run once.
+    Save the processed MODIS/NSIDC surface map to a self-describing NetCDF4
+    file that can be reloaded by :func:`load_map` or inspected with xarray /
+    ncview.
 
-    Files written
-    -------------
-    ``{out_dir}/kofman_land_fracs.npz``   — land_fracs dict
-    ``{out_dir}/kofman_snow_mask.npy``    — snow_mask bool array
+    The file contains the per-pixel class fractions from MCD12C1, the merged
+    snow/ice mask, and a derived binary ``map_image`` suitable for
+    :class:`SpectralMap`.  Lat/lon coordinate arrays and processing metadata
+    are embedded as attributes.
+
+    Parameters
+    ----------
+    land_fracs : dict[str, ndarray]
+        Output of :func:`process_mcd12c1`.
+    snow_mask : ndarray, bool, shape (91, 144)
+        Output of :func:`process_snow_ice`.  Row 0 = North Pole.
+    out_path : str
+        Destination ``.nc`` file path (created or overwritten).
+    snow_threshold : int
+        MOD10CM snow threshold used when generating ``snow_mask``; stored as
+        an attribute for provenance.
+    target_date : datetime.date
+        NSIDC snapshot date; stored as an attribute.
+    source_files : dict, optional
+        ``{'mcd12c1': '/path/…', 'mod10cm': '/path/…', 'nsidc_ice': '/path/…'}``
+        — stored as global attributes for provenance.
     """
-    os.makedirs(out_dir, exist_ok=True)
-    np.savez_compressed(
-        os.path.join(out_dir, "kofman_land_fracs.npz"),
-        **{k: v for k, v in land_fracs.items()},
-    )
-    np.save(os.path.join(out_dir, "kofman_snow_mask.npy"), snow_mask)
-    print(f"Saved processed arrays to {out_dir}/kofman_land_fracs.npz "
-          f"and kofman_snow_mask.npy")
+    try:
+        import netCDF4 as nc4
+    except ImportError as exc:
+        raise ImportError(
+            "netCDF4 is required to save maps.  Install with:\n"
+            "  conda install -c conda-forge netCDF4"
+        ) from exc
+    import datetime as _dt
+
+    map_image, _ = build_map_image(land_fracs, snow_mask)
+
+    lats = np.linspace( 90.0, -90.0, OUT_NLAT, dtype=np.float32)
+    lons = np.linspace(-180.0, 177.5, OUT_NLON, dtype=np.float32)
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+
+    with nc4.Dataset(out_path, "w", format="NETCDF4") as ds:
+        # ── Global attributes ────────────────────────────────────────────────
+        ds.title          = "Kofman (2024) 5-class surface map (MODIS / NSIDC)"
+        ds.Conventions    = "CF-1.8"
+        ds.created        = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        ds.snow_threshold = snow_threshold
+        ds.target_date    = str(target_date)
+        ds.grid_nlat      = OUT_NLAT
+        ds.grid_nlon      = OUT_NLON
+        ds.grid_dlat      = "2.0 degrees"
+        ds.grid_dlon      = "2.5 degrees"
+        if source_files:
+            for k, v in source_files.items():
+                setattr(ds, f"source_{k}", os.path.basename(str(v)))
+
+        # ── Dimensions ───────────────────────────────────────────────────────
+        ds.createDimension("lat", OUT_NLAT)
+        ds.createDimension("lon", OUT_NLON)
+
+        # ── Coordinate variables ─────────────────────────────────────────────
+        v_lat             = ds.createVariable("lat", "f4", ("lat",))
+        v_lat[:]          = lats
+        v_lat.units       = "degrees_north"
+        v_lat.long_name   = "latitude"
+        v_lat.axis        = "Y"
+
+        v_lon             = ds.createVariable("lon", "f4", ("lon",))
+        v_lon[:]          = lons
+        v_lon.units       = "degrees_east"
+        v_lon.long_name   = "longitude"
+        v_lon.axis        = "X"
+
+        # ── Class fraction variables (5 Kofman classes) ──────────────────────
+        _class_desc = {
+            "ocean":  "Open water / permanent water bodies (IGBP class 17 + class 0)",
+            "forest": "Closed/open forest (IGBP classes 1–5)",
+            "grass":  "Grassland, savanna, cropland (IGBP classes 9–10, 12, 14)",
+            "soil":   "Bare soil, urban (IGBP classes 6–8, 11, 13, 16)",
+            "snow":   "Permanent snow and ice (IGBP class 15)",
+        }
+        for cls in _KOFMAN_CLASSES:
+            v             = ds.createVariable(
+                f"frac_{cls}", "f4", ("lat", "lon"),
+                zlib=True, complevel=4, fill_value=np.float32(-9999.0),
+            )
+            v[:]          = land_fracs[cls]
+            v.long_name   = _class_desc.get(cls, cls)
+            v.units       = "1"
+            v.valid_range = np.array([0.0, 1.0], dtype=np.float32)
+            v.comment     = (
+                "Areal fraction within each 2°×2.5° grid cell, derived from "
+                "MCD12C1 IGBP Type 1 Percent layer. Fractions sum to 1.0 per cell."
+            )
+
+        # ── Derived binary map_image ─────────────────────────────────────────
+        v_map             = ds.createVariable(
+            "map_image", "f4", ("lat", "lon"),
+            zlib=True, complevel=4, fill_value=np.float32(-9999.0),
+        )
+        v_map[:]          = map_image
+        v_map.long_name   = "Binary ocean/land mask for SpectralMap"
+        v_map.units       = "1"
+        v_map.flag_values = "0.0 1.0"
+        v_map.flag_meanings = "ocean land"
+        v_map.comment     = (
+            "Derived from frac_ocean >= 0.5 → ocean (0.0), else land (1.0). "
+            "Pass directly to SpectralMap(map_image=…). "
+            "Snow pixels are kept as land here; apply snow_mask after construction."
+        )
+
+        # ── Snow / sea-ice mask ──────────────────────────────────────────────
+        v_snow            = ds.createVariable(
+            "snow_mask", "i1", ("lat", "lon"),
+            zlib=True, complevel=4, fill_value=np.int8(-1),
+        )
+        v_snow[:]         = snow_mask.astype(np.int8)
+        v_snow.long_name  = "Snow / sea-ice mask (MOD10CM + NSIDC merged)"
+        v_snow.units      = "1"
+        v_snow.flag_values = "0 1"
+        v_snow.flag_meanings = "no_snow snow_or_ice"
+        v_snow.comment    = (
+            f"MOD10CM threshold={snow_threshold}% merged with NSIDC EASE-Grid "
+            f"sea-ice (week nearest {target_date}). Row 0 = North Pole."
+        )
+
+    print(f"Map saved → {out_path}")
 
 
-def load_processed(cache_dir: str = ".") -> tuple[dict[str, np.ndarray], np.ndarray]:
+def load_map(
+    path: str,
+) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
     """
-    Load previously saved processed arrays.
+    Load a surface map saved by :func:`save_map`.
+
+    Parameters
+    ----------
+    path : str
+        Path to a ``.nc`` file written by :func:`save_map`.
 
     Returns
     -------
-    (land_fracs, snow_mask)
+    land_fracs : dict[str, ndarray]
+        Five float32 (91, 144) arrays keyed by class name
+        (``'ocean'``, ``'forest'``, ``'grass'``, ``'soil'``, ``'snow'``).
+    snow_mask : ndarray, bool, shape (91, 144)
+        Merged MOD10CM + NSIDC snow/ice mask.  Row 0 = North Pole.
+    map_image : ndarray, float32, shape (91, 144)
+        Binary 0/1 ocean/land mask, ready for ``SpectralMap(map_image=…)``.
 
     Raises
     ------
-    FileNotFoundError if the cache files are not present.
+    FileNotFoundError
+        If ``path`` does not exist.
     """
-    fracs_path = os.path.join(cache_dir, "kofman_land_fracs.npz")
-    snow_path  = os.path.join(cache_dir, "kofman_snow_mask.npy")
+    try:
+        import netCDF4 as nc4
+    except ImportError as exc:
+        raise ImportError(
+            "netCDF4 is required to load maps.  Install with:\n"
+            "  conda install -c conda-forge netCDF4"
+        ) from exc
 
-    if not os.path.isfile(fracs_path) or not os.path.isfile(snow_path):
+    if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"Cache files not found in {cache_dir!r}.  "
-            "Run process_mcd12c1() and process_snow_ice() first, then "
-            "call save_processed()."
+            f"Map file not found: {path!r}\n"
+            "Run kofman2024_surface_map.py to generate it."
         )
 
-    data = np.load(fracs_path)
-    land_fracs = {k: data[k] for k in _KOFMAN_CLASSES}
-    snow_mask  = np.load(snow_path)
-    print(f"Loaded cached arrays from {cache_dir}")
-    return land_fracs, snow_mask
+    with nc4.Dataset(path, "r") as ds:
+        land_fracs = {
+            cls: np.asarray(ds[f"frac_{cls}"][:]).astype(np.float32)
+            for cls in _KOFMAN_CLASSES
+        }
+        snow_mask = np.asarray(ds["snow_mask"][:]).astype(bool)
+        map_image = np.asarray(ds["map_image"][:]).astype(np.float32)
+
+        # Print provenance from attributes
+        tgt  = getattr(ds, "target_date",    "unknown")
+        thr  = getattr(ds, "snow_threshold", "unknown")
+        when = getattr(ds, "created",        "unknown")
+        print(f"[load_map] {os.path.basename(path)}  "
+              f"(created {when}, target={tgt}, snow_threshold={thr}%)")
+
+    return land_fracs, snow_mask, map_image
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -856,13 +1015,21 @@ def load_processed(cache_dir: str = ".") -> tuple[dict[str, np.ndarray], np.ndar
 if __name__ == "__main__":
     import argparse
 
+    _HERE_CLI = os.path.dirname(os.path.abspath(__file__))
+
     parser = argparse.ArgumentParser(
-        description="Process MODIS/NSIDC data into Kofman (2024) surface map.",
+        description=(
+            "Process MODIS MCD12C1 land cover + MOD10CM / NSIDC snow/ice data "
+            "into a self-describing NetCDF4 surface map for the Kofman (2024) "
+            "Earth reflection simulations."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--save-cache", metavar="DIR", default=".",
-        help="Directory to save processed .npz/.npy cache files.",
+        "--output", "-o",
+        default=os.path.join(_HERE_CLI, "kofman_surface_map.nc"),
+        metavar="FILE.nc",
+        help="Output NetCDF4 file path.",
     )
     parser.add_argument(
         "--snow-threshold", type=int, default=50,
@@ -874,25 +1041,27 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--no-plot", action="store_true",
-        help="Skip diagnostic map plots.",
+        help="Skip the diagnostic PNG map.",
     )
     args = parser.parse_args()
 
     target = datetime.date.fromisoformat(args.target_date)
 
-    # Resolve data paths from environment
+    # ── Resolve data paths from environment ──────────────────────────────────
     paths = get_data_paths()
     print(f"MCD12C1 : {paths['mcd12c1']}")
     print(f"MOD10CM : {paths['mod10cm']}")
     print(f"NSIDC   : {paths['nsidc_ice']}")
 
+    # ── Step 1: land cover ───────────────────────────────────────────────────
     print("\n" + "═" * 60)
-    print("  Processing land cover …")
+    print("  Processing land cover (MCD12C1) …")
     print("═" * 60)
     land_fracs = process_mcd12c1(paths["mcd12c1"])
 
+    # ── Step 2: snow / sea-ice ───────────────────────────────────────────────
     print("\n" + "═" * 60)
-    print("  Processing snow / sea-ice …")
+    print("  Processing snow / sea-ice (MOD10CM + NSIDC) …")
     print("═" * 60)
     snow_mask = process_snow_ice(
         paths["mod10cm"], paths["nsidc_ice"],
@@ -900,17 +1069,26 @@ if __name__ == "__main__":
         target_date=target,
     )
 
-    map_image, snow_mask_flipped = build_map_image(land_fracs, snow_mask)
+    # ── Step 3: save NetCDF4 ─────────────────────────────────────────────────
+    print("\n" + "═" * 60)
+    print("  Saving map …")
+    print("═" * 60)
+    save_map(
+        land_fracs, snow_mask,
+        out_path=args.output,
+        snow_threshold=args.snow_threshold,
+        target_date=target,
+        source_files=paths,
+    )
 
-    # Save cache
-    save_processed(land_fracs, snow_mask, out_dir=args.save_cache)
-
-    # Optional diagnostic plots
+    # ── Optional diagnostic PNG ──────────────────────────────────────────────
     if not args.no_plot:
         try:
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
+
+            map_image, _ = build_map_image(land_fracs, snow_mask)
 
             fig, axes = plt.subplots(2, 3, figsize=(15, 8))
             titles = ["ocean", "forest", "grass", "soil", "snow", "map_image"]
@@ -930,9 +1108,9 @@ if __name__ == "__main__":
                 fontsize=13,
             )
             plt.tight_layout()
-            out_fig = os.path.join(args.save_cache, "kofman_surface_map.png")
+            out_fig = os.path.splitext(args.output)[0] + ".png"
             plt.savefig(out_fig, dpi=120, bbox_inches="tight")
-            print(f"\nDiagnostic plot saved → {out_fig}")
+            print(f"Diagnostic plot saved → {out_fig}")
         except Exception as e:
             print(f"(Plot skipped: {e})")
 
