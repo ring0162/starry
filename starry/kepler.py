@@ -1141,7 +1141,14 @@ class System(object):
             sec = self._secondaries[0]
             xo = _dg((x_abs[1] - x_abs[0]) / pri_r)
             yo = _dg((y_abs[1] - y_abs[0]) / pri_r)
+            zo = _dg((z_abs[1] - z_abs[0]) / pri_r)
             ro = sec._r / pri_r
+            # Only apply occultation when planet is in front (zo > 0).
+            # When behind the star, move the occultor far off-disk so
+            # get_kT_occ falls back to the full-disk kernel.
+            in_front = theano.tensor.gt(zo, 0.0)
+            xo = theano.tensor.switch(in_front, xo, theano.tensor.ones_like(xo) * 999.0)
+            yo = theano.tensor.switch(in_front, yo, theano.tensor.ones_like(yo) * 999.0)
             return doppler_map.flux(
                 theta=theta,
                 normalize=normalize,
@@ -1166,7 +1173,11 @@ class System(object):
         for i, sec in enumerate(self._secondaries):
             xo_i = _dg((x_abs[i + 1] - x_abs[0]) / pri_r)
             yo_i = _dg((y_abs[i + 1] - y_abs[0]) / pri_r)
+            zo_i = _dg((z_abs[i + 1] - z_abs[0]) / pri_r)
             ro_i = sec._r / pri_r
+            in_front_i = theano.tensor.gt(zo_i, 0.0)
+            xo_i = theano.tensor.switch(in_front_i, xo_i, theano.tensor.ones_like(xo_i) * 999.0)
+            yo_i = theano.tensor.switch(in_front_i, yo_i, theano.tensor.ones_like(yo_i) * 999.0)
             flux_occ_i = doppler_map.flux(
                 theta=theta,
                 normalize=False,
