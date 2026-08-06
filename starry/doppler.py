@@ -207,7 +207,10 @@ class DopplerMap:
         # Compute the size of the internal wavelength grid
         # Note that this must be odd!
         if wav0 is None:
-            oversample = 1
+            if oversample is None:
+                oversample = 1
+            else:
+                oversample = int(oversample)
         else:
             oversample = int(np.ceil(len(wav0) / len(wav)))
         nw = int(len(wav) * oversample)
