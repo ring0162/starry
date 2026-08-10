@@ -3084,7 +3084,7 @@ class OpsSystem(object):
 
             stencil = tt.shape_padright(tt.shape_padleft(stencil, 1), 1)
             return tt.sum(
-                stencil * tt.reshape(X, (-1, self.oversample, X.shape[1])),
+                stencil * tt.reshape(X, (-1, oversample, X.shape[1])),
                 axis=1,
             )
 
