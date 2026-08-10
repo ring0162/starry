@@ -6,11 +6,18 @@ print(f"Recursion limit: {sys.getrecursionlimit()}")
 
 import os
 os.environ['THEANO_FLAGS'] = 'exception_verbosity=high'
-os.environ['THEANO_FLAGS'] = 'optimizer=None'
 
 import theano
 theano.config.exception_verbosity = 'high'
-theano.config.optimizer = 'None'
+# NOTE: optimizer was previously forced to 'None' here, which disables ALL
+# Theano graph optimization (CSE, fusion, algebraic simplification, dead-code
+# elimination) on top of an already-large occultation-kernel graph. This
+# directly conflicted with starry/kepler.py's own forced `fast_compile`
+# setting for DopplerMap Systems (see System.__init__), and was identified
+# once before (git history, commit f4304d8) as the actual root cause of a
+# prior "10-100x slower" complaint. Removed so kepler.py's fast_compile
+# setting actually takes effect. See the DopplerMap occultation speedup
+# plan (Phase 1.1) for the diagnostic that motivated this change.
 import pandas as pd
 import matplotlib.pyplot as plt
 import pickle
