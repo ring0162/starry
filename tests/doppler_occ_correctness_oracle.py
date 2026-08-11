@@ -65,6 +65,16 @@ def build_map():
     dm[2] = 0.2
     dm.veq = 20000.0
     dm.inc = 90.0
+    # Load an actual absorption line into the rest-frame spectrum. Without
+    # this, the default rest-frame spectrum is flat continuum (uniform
+    # 1.0), so there is no line structure for occultation geometry to
+    # distort -- every ro value produces an identical flat-continuum
+    # output, and this fixture would be unable to detect ANY correctness
+    # regression in get_kT_occ/get_rT_occ.
+    wav0 = dm.wav0
+    line_ctrst, line_wav, line_sigma = 0.6, 600.0, 0.5
+    intr_spec = 1.0 - line_ctrst * np.exp(-0.5 * ((wav0 - line_wav) / line_sigma) ** 2)
+    dm.load(spectrum=intr_spec)
     dm.obl = 0.0
     return dm
 
