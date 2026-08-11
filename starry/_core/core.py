@@ -2085,7 +2085,15 @@ class OpsDoppler(OpsYlm):
         on-disk epochs, kT0 is recomputed from the occulted rT.
 
         The limb-darkening operator is epoch-independent and is computed
-        once outside the loop.
+        once outside the loop. The final phase rotation (right_project)
+        is batched across all epochs in a single call rather than nt
+        separate per-epoch calls -- this both avoids nt redundant
+        recomputations of the epoch-independent inc/obl rotation inside
+        right_project, and routes through tensordotRzOp's native batched
+        C++ implementation instead of nt separate scalar-theta dotROp
+        calls (see right_project's theta.ndim > 0 branch, and its use in
+        OpsYlm.X() where an epoch-independent matrix is likewise tiled to
+        match theta's length before a single batched call).
 
         Args:
             xo: Occultor x-position, vector of length ``nt``.
@@ -2118,7 +2126,10 @@ class OpsDoppler(OpsYlm):
             L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
             kT0_full = tt.dot(tt.transpose(L), kT0_full)
 
-        kT = tt.zeros((self.nt, self.Ny, self.nk))
+        # Collect each epoch's (occultation-selected) kT0, shape (Ny, nk).
+        # The per-epoch occultation integral itself (get_rT_occ) is not
+        # yet vectorized over epochs -- only the phase rotation below is.
+        kT0_list = []
         for m in range(self.nt):
             # Check whether the occultor's disk could overlap the star.
             # Distance is rotation-invariant so we can use either frame.
@@ -2135,19 +2146,28 @@ class OpsDoppler(OpsYlm):
 
             # Select: use the occulted kT0 when the occultor is on-disk,
             # otherwise fall back to the clean full-disk kT0.
-            kT0 = tt.switch(on_disk, kT0_occ, kT0_full)
+            kT0_list.append(tt.switch(on_disk, kT0_occ, kT0_full))
 
-            kT = tt.set_subtensor(
-                kT[m],
-                tt.transpose(
-                    self.right_project(
-                        tt.transpose(kT0),
-                        inc,
-                        tt.as_tensor_variable(0.0),
-                        theta[m],
-                    )
-                ),
-            )
+        # --- Batched phase rotation across all epochs in a single call ---
+        # Stack the per-epoch (Ny, nk) kernels, transposed so Ny (the
+        # rotatable spherical-harmonic axis) is last, into (nt, nk, Ny);
+        # flatten the epoch and kernel-tap axes together into (nt*nk, Ny)
+        # (row m*nk+k holds epoch m's tap k); pair each of those nt*nk
+        # rows with its own epoch's theta value via tt.repeat (each
+        # theta[m] repeated nk times, matching the flattening order) so
+        # right_project's tensordotRzOp path rotates every epoch's kernel
+        # by the correct phase in one batched C++ call.
+        M_stacked = tt.reshape(
+            tt.stack([tt.transpose(kT0_m) for kT0_m in kT0_list], axis=0),
+            (self.nt * self.nk, self.Ny),
+        )
+        theta_expanded = tt.repeat(theta, self.nk)
+        M_rotated = self.right_project(
+            M_stacked, inc, tt.as_tensor_variable(0.0), theta_expanded
+        )
+        kT = tt.transpose(
+            tt.reshape(M_rotated, (self.nt, self.nk, self.Ny)), (0, 2, 1)
+        )
         return kT
 
     @autocompile
