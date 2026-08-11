@@ -475,7 +475,17 @@ class System(object):
             # We must also clear the cached default mode so that
             # theano.function() (including calls from PyMC3) picks up
             # the new optimizer setting.
-            if self._lazy:
+            #
+            # STARRY_DOPPLER_FORCE_FAST_COMPILE=0 disables this override,
+            # letting the caller's own theano.config settings (e.g. a
+            # manually-configured fast_run or fusion-excluded Mode) take
+            # effect instead. This exists purely to make the tradeoff
+            # A/B-testable (see the DopplerMap occultation speedup plan,
+            # Phase 1.3) -- it is NOT intended for normal use, since the
+            # C-compiler-blowup risk fast_compile exists to avoid is real.
+            if self._lazy and os.environ.get(
+                "STARRY_DOPPLER_FORCE_FAST_COMPILE", "1"
+            ) != "0":
                 import theano.compile.mode as _tcm
 
                 theano.config.mode = "Mode"
