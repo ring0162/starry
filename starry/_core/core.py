@@ -1856,17 +1856,37 @@ class OpsDoppler(OpsYlm):
     @autocompile
     def get_rT_occ(self, x, xo, yo, ro):
         """
-        The `rho^T` solution vector during an occultation.
+        The `rho^T` solution vector during an occultation, computed for
+        ALL epochs at once (no per-epoch Python loop).
 
-        Computes the full-disk integral and subtracts the contribution
-        blocked by an occultor at position (xo, yo) with radius ro in
-        the Doppler coordinate frame (x = lines of constant radial
+        Computes the full-disk integral once -- it depends only on `x`,
+        not on the occultor's per-epoch position, so unlike a per-epoch
+        call it is not redundantly recomputed for every epoch -- and
+        subtracts, for EACH epoch, the contribution blocked by an
+        occultor at position (xo[m], yo[m]) with radius ro in the
+        Doppler coordinate frame (x = lines of constant radial
         velocity).
+
+        Args:
+            x: Doppler-coordinate grid, vector of length ``nk``.
+            xo: Occultor x-position, vector of length ``nt``.
+            yo: Occultor y-position, vector of length ``nt``.
+            ro: Occultor radius (scalar).
+
+        Returns:
+            Solution vector of shape ``(N, nt * nk)`` where
+            ``N = (deg + 1) ** 2``, with the epoch and kernel-tap axes
+            flattened together (epoch-major: index ``m * nk + k``) so
+            it feeds into get_kT0's existing 2-D sparse dot unchanged.
+            Reshape to ``(N, nt, nk)`` to recover the per-epoch axis.
         """
         deg = self.ydeg + self.udeg
+        nk = self.nk
+        nt = self.nt
 
-        # --- Full-disk solution (same recursion as get_rT) ---
-        sijk = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
+        # --- Full-disk solution (shared across all epochs -- depends
+        # only on x, not on xo/yo/ro; same recursion as get_rT) ---
+        sijk = tt.zeros((deg + 1, deg + 1, 2, nk))
         r2 = tt.maximum(1 - x ** 2, tt.zeros_like(x))
         r = tt.maximum(1 - x ** 2, tt.zeros_like(x) + 1e-100) ** 0.5
         r = tt.switch(tt.gt(r, 1e-49), r, tt.zeros_like(r))
@@ -1885,19 +1905,24 @@ class OpsDoppler(OpsYlm):
         for i in range(1, deg + 1):
             sijk = tt.set_subtensor(sijk[i], sijk[i - 1] * x)
 
-        # --- Occultation correction ---
-        # Broadcast occultor parameters to the shape of x
-        xo = xo * tt.ones_like(x)
-        yo = yo * tt.ones_like(x)
-        ro = ro * tt.ones_like(x)
+        # --- Occultation correction, for all epochs at once ---
+        # xo2, yo2: (nt, 1); x-slice-dependent quantities reshaped to
+        # (1, nk) -- these broadcast together to (nt, nk) wherever
+        # combined below (standard Theano/numpy broadcasting).
+        xo2 = tt.shape_padright(xo)  # (nt, 1)
+        yo2 = tt.shape_padright(yo)  # (nt, 1)
+        x2 = tt.shape_padleft(x)  # (1, nk)
+        r_2d = tt.shape_padleft(r)  # (1, nk)
+        r2_2d = tt.shape_padleft(r2)  # (1, nk)
 
-        # Half-chord of the occultor at each x-slice
-        chi_sq = tt.maximum(ro ** 2 - (x - xo) ** 2, tt.zeros_like(x))
-        chi = tt.maximum(chi_sq, tt.zeros_like(x) + 1e-100) ** 0.5
+        # Half-chord of the occultor at each (epoch, x-slice).
+        chi_sq = tt.maximum(ro ** 2 - (x2 - xo2) ** 2, tt.zeros((nt, nk)))
+        chi = tt.maximum(chi_sq, tt.zeros((nt, nk)) + 1e-100) ** 0.5
         chi = tt.switch(tt.gt(chi_sq, 0), chi, tt.zeros_like(chi))
 
-        # Determine whether each x-slice is inside the occultor's range
-        in_range = tt.and_(tt.le(xo - ro, x), tt.le(x, xo + ro))
+        # Determine whether each (epoch, x-slice) is inside the
+        # occultor's range.
+        in_range = tt.and_(tt.le(xo2 - ro, x2), tt.le(x2, xo2 + ro))  # (nt, nk)
 
         # Upper and lower integration limits, clipped to the stellar
         # disk boundary at y = +/- r(x).
@@ -1906,16 +1931,16 @@ class OpsDoppler(OpsYlm):
         # both branches, so an unguarded division produces NaN that
         # poisons the result even though the switch would select the
         # other branch.
-        r_safe = tt.maximum(r, tt.ones_like(r) * 1e-30)
+        r_safe = tt.maximum(r_2d, tt.ones((1, nk)) * 1e-30)
         ul = tt.switch(
             in_range,
-            tt.switch(tt.gt(yo + chi, r), tt.ones_like(r), (yo + chi) / r_safe),
-            tt.zeros_like(r),
+            tt.switch(tt.gt(yo2 + chi, r_2d), tt.ones((nt, nk)), (yo2 + chi) / r_safe),
+            tt.zeros((nt, nk)),
         )
         ll = tt.switch(
             in_range,
-            tt.switch(tt.lt(yo - chi, -r), -tt.ones_like(r), (yo - chi) / r_safe),
-            tt.zeros_like(r),
+            tt.switch(tt.lt(yo2 - chi, -r_2d), -tt.ones((nt, nk)), (yo2 - chi) / r_safe),
+            tt.zeros((nt, nk)),
         )
 
         # Hard-clamp ul, ll to (-1+eps, 1-eps).  At exactly ±1, arcsin
@@ -1930,11 +1955,12 @@ class OpsDoppler(OpsYlm):
         ul = tt.clip(ul, -1.0 + _eps, 1.0 - _eps)
         ll = tt.clip(ll, -1.0 + _eps, 1.0 - _eps)
 
-        # Occultation integrals
-        sijk_o = tt.zeros((deg + 1, deg + 1, 2, tt.shape(x)[0]))
+        # Occultation integrals, now with an explicit nt axis:
+        # (deg+1, deg+1, 2, nt, nk).
+        sijk_o = tt.zeros((deg + 1, deg + 1, 2, nt, nk))
 
         # I_j auxiliary integrals (for the k=1 column of sijk_o)
-        Ij = tt.zeros((deg + 1, tt.shape(x)[0]))
+        Ij = tt.zeros((deg + 1, nt, nk))
         Ij = tt.set_subtensor(
             Ij[0],
             0.5 * (
@@ -1950,19 +1976,19 @@ class OpsDoppler(OpsYlm):
         )
 
         # Initial conditions (i = 0)
-        sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul - ll) * r)
+        sijk_o = tt.set_subtensor(sijk_o[0, 0, 0], (ul - ll) * r_2d)
         sijk_o = tt.set_subtensor(
-            sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2
+            sijk_o[0, 1, 0], 0.5 * (ul ** 2 - ll ** 2) * r2_2d
         )
-        sijk_o = tt.set_subtensor(sijk_o[0, 0, 1], Ij[0] * r2)
-        sijk_o = tt.set_subtensor(sijk_o[0, 1, 1], Ij[1] * r ** 3)
+        sijk_o = tt.set_subtensor(sijk_o[0, 0, 1], Ij[0] * r2_2d)
+        sijk_o = tt.set_subtensor(sijk_o[0, 1, 1], Ij[1] * r_2d ** 3)
 
         # Upward recursion in j (i = 0)
         for j in range(2, deg + 1):
             sijk_o = tt.set_subtensor(
                 sijk_o[0, j, 0],
                 (1.0 / (j + 1.0))
-                * ((ul * r) ** (j + 1) - (ll * r) ** (j + 1)),
+                * ((ul * r_2d) ** (j + 1) - (ll * r_2d) ** (j + 1)),
             )
             Ij = tt.set_subtensor(
                 Ij[j],
@@ -1974,27 +2000,32 @@ class OpsDoppler(OpsYlm):
                 ),
             )
             sijk_o = tt.set_subtensor(
-                sijk_o[0, j, 1], r ** (j + 2) * Ij[j]
+                sijk_o[0, j, 1], r_2d ** (j + 2) * Ij[j]
             )
 
-        # Upward recursion in i
+        # Upward recursion in i.  x2 (1, nk) broadcasts against (nt, nk).
         for i in range(1, deg + 1):
-            sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x)
+            sijk_o = tt.set_subtensor(sijk_o[i], sijk_o[i - 1] * x2)
 
-        # Subtract the occulted region from the full-disk solution
-        sijk = sijk - sijk_o
+        # Subtract the occulted region from the full-disk solution.
+        # sijk (deg+1, deg+1, 2, nk) broadcasts against sijk_o's
+        # (deg+1, deg+1, 2, nt, nk) by inserting a size-1 nt axis.
+        sijk_full_bcast = tt.reshape(sijk, (deg + 1, deg + 1, 2, 1, nk))
+        sijk_all = sijk_full_bcast - sijk_o  # (deg+1, deg+1, 2, nt, nk)
 
-        # Assemble into the polynomial-indexed vector
+        # Assemble into the polynomial-indexed vector, then flatten the
+        # (nt, nk) axes together (epoch-major) so this feeds into
+        # get_kT0's existing 2-D sparse dot unchanged.
         N = (deg + 1) ** 2
-        s = tt.zeros((N, tt.shape(x)[0]))
+        s = tt.zeros((N, nt, nk))
         n = np.arange(N)
         LAM = np.floor(np.sqrt(n))
         DEL = 0.5 * (n - LAM ** 2)
         i = np.array(np.floor(LAM - DEL), dtype=int)
         j = np.array(np.floor(DEL), dtype=int)
         k = np.array(np.ceil(DEL) - np.floor(DEL), dtype=int)
-        s = tt.set_subtensor(s[n], sijk[i, j, k])
-        return s
+        s = tt.set_subtensor(s[n], sijk_all[i, j, k])
+        return tt.reshape(s, (N, nt * nk))
 
     @autocompile
     def get_kT0(self, rT):
@@ -2077,7 +2108,8 @@ class OpsDoppler(OpsYlm):
     def get_kT_occ(self, inc, obl, theta, veq, u, xo, yo, ro):
         """
         Get the kernels at an array of angular phases `theta` during
-        an occultation.
+        an occultation, fully vectorized over epochs (no per-epoch
+        Python loop anywhere in this function).
 
         For epochs where the occultor's projected disk does not overlap
         the stellar disk, we reuse the standard (non-occultation) kT0 to
@@ -2085,15 +2117,12 @@ class OpsDoppler(OpsYlm):
         on-disk epochs, kT0 is recomputed from the occulted rT.
 
         The limb-darkening operator is epoch-independent and is computed
-        once outside the loop. The final phase rotation (right_project)
-        is batched across all epochs in a single call rather than nt
-        separate per-epoch calls -- this both avoids nt redundant
-        recomputations of the epoch-independent inc/obl rotation inside
-        right_project, and routes through tensordotRzOp's native batched
-        C++ implementation instead of nt separate scalar-theta dotROp
-        calls (see right_project's theta.ndim > 0 branch, and its use in
-        OpsYlm.X() where an epoch-independent matrix is likewise tiled to
-        match theta's length before a single batched call).
+        once. The occultation integral (get_rT_occ, vectorized over
+        epochs), its resulting kT0's per-epoch normalization, the
+        on-disk selection, and the final phase rotation (right_project,
+        batched via tensordotRzOp) are each a single batched tensor
+        operation covering all epochs at once, rather than a Python loop
+        unrolling a separate subgraph per epoch.
 
         Args:
             xo: Occultor x-position, vector of length ``nt``.
@@ -2116,7 +2145,7 @@ class OpsDoppler(OpsYlm):
 
         # --- Compute the unocculted (full-disk) kT0 once ---
         rT_full = self.get_rT(x)
-        kT0_full = self.get_kT0(rT_full)
+        kT0_full = self.get_kT0(rT_full)  # (Ny, nk), already normalized
 
         # Precompute limb-darkening operator (does not depend on epoch)
         if self.udeg > 0:
@@ -2126,40 +2155,62 @@ class OpsDoppler(OpsYlm):
             L = ts.dot(ts.dot(self.A1Inv, F), self.A1)
             kT0_full = tt.dot(tt.transpose(L), kT0_full)
 
-        # Collect each epoch's (occultation-selected) kT0, shape (Ny, nk).
-        # The per-epoch occultation integral itself (get_rT_occ) is not
-        # yet vectorized over epochs -- only the phase rotation below is.
-        kT0_list = []
-        for m in range(self.nt):
-            # Check whether the occultor's disk could overlap the star.
-            # Distance is rotation-invariant so we can use either frame.
-            dist_sq = xo[m] ** 2 + yo[m] ** 2
-            on_disk = tt.lt(dist_sq, (1.0 + ro) ** 2)
+        # --- Occulted kT0 for ALL epochs at once ---
+        # get_rT_occ returns (N, nt*nk), flattened epoch-major so the
+        # sparse dot below stays a plain 2-D operation (matching
+        # get_kT0's own, unmodified 2-D dot exactly).
+        rT_occ_all = self.get_rT_occ(x, xo_rot, yo_rot, ro)  # (N, nt*nk)
+        kT0_occ_flat = ts.dot(ts.transpose(self._A1Big), rT_occ_all)  # (Ny, nt*nk)
+        kT0_occ_all = tt.reshape(kT0_occ_flat, (self.Ny, self.nt, self.nk))
 
-            # Occulted kT0 for this epoch, using rotated planet positions
-            # so the occultation is computed in the canonical velocity frame.
-            rT_occ = self.get_rT_occ(x, xo_rot[m], yo_rot[m], ro)
-            kT0_occ = self.get_kT0(rT_occ)
+        # Per-epoch normalization -- mirrors get_kT0's own normalization
+        # (sum over kernel taps to preserve the unit baseline), but
+        # computed separately for EACH epoch (summing only over the nk
+        # axis) rather than one value combined across all epochs, which
+        # calling get_kT0 directly on the flattened (Ny, nt*nk) tensor
+        # would silently get wrong. Must happen BEFORE limb-darkening is
+        # applied below, matching get_kT0-then-L ordering in the
+        # original per-epoch code (L is not diagonal, so normalizing
+        # before vs. after applying it are not equivalent).
+        norm = tt.sum(kT0_occ_all[0], axis=-1, keepdims=True)  # (nt, 1)
+        norm = tt.switch(tt.eq(norm, 0), tt.ones_like(norm), norm)
+        kT0_occ_all = kT0_occ_all / tt.reshape(norm, (1, self.nt, 1))
 
-            if self.udeg > 0:
-                kT0_occ = tt.dot(tt.transpose(L), kT0_occ)
+        if self.udeg > 0:
+            kT0_occ_flat = tt.reshape(
+                kT0_occ_all, (self.Ny, self.nt * self.nk)
+            )
+            kT0_occ_flat = tt.dot(tt.transpose(L), kT0_occ_flat)
+            kT0_occ_all = tt.reshape(
+                kT0_occ_flat, (self.Ny, self.nt, self.nk)
+            )
 
-            # Select: use the occulted kT0 when the occultor is on-disk,
-            # otherwise fall back to the clean full-disk kT0.
-            kT0_list.append(tt.switch(on_disk, kT0_occ, kT0_full))
+        # On-disk mask for every epoch at once (purely elementwise over
+        # xo, yo -- never depended on the per-epoch loop to begin with).
+        # Distance is rotation-invariant so we can use either frame.
+        dist_sq = xo ** 2 + yo ** 2  # (nt,)
+        on_disk = tt.lt(dist_sq, (1.0 + ro) ** 2)  # (nt,)
+
+        # Select: use the occulted kT0 when the occultor is on-disk,
+        # otherwise fall back to the clean full-disk kT0 -- for all
+        # epochs in a single batched switch.
+        kT0_full_bcast = tt.reshape(kT0_full, (self.Ny, 1, self.nk))
+        on_disk_bcast = tt.reshape(on_disk, (1, self.nt, 1))
+        kT0_all = tt.switch(
+            on_disk_bcast, kT0_occ_all, kT0_full_bcast
+        )  # (Ny, nt, nk)
 
         # --- Batched phase rotation across all epochs in a single call ---
-        # Stack the per-epoch (Ny, nk) kernels, transposed so Ny (the
-        # rotatable spherical-harmonic axis) is last, into (nt, nk, Ny);
-        # flatten the epoch and kernel-tap axes together into (nt*nk, Ny)
-        # (row m*nk+k holds epoch m's tap k); pair each of those nt*nk
-        # rows with its own epoch's theta value via tt.repeat (each
-        # theta[m] repeated nk times, matching the flattening order) so
-        # right_project's tensordotRzOp path rotates every epoch's kernel
-        # by the correct phase in one batched C++ call.
+        # Rearrange to (nt, nk, Ny) (Ny -- the rotatable spherical-
+        # harmonic axis -- last, matching right_project's expected input
+        # convention), flatten to (nt*nk, Ny) (row m*nk+k holds epoch
+        # m's tap k), and pair each row with its own epoch's theta value
+        # via tt.repeat (each theta[m] repeated nk times, matching the
+        # flattening order) so right_project's tensordotRzOp path
+        # rotates every epoch's kernel by the correct phase in one
+        # batched C++ call.
         M_stacked = tt.reshape(
-            tt.stack([tt.transpose(kT0_m) for kT0_m in kT0_list], axis=0),
-            (self.nt * self.nk, self.Ny),
+            tt.transpose(kT0_all, (1, 2, 0)), (self.nt * self.nk, self.Ny)
         )
         theta_expanded = tt.repeat(theta, self.nk)
         M_rotated = self.right_project(
