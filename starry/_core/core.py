@@ -2156,18 +2156,23 @@ class OpsDoppler(OpsYlm):
             kT0_full = tt.dot(tt.transpose(L), kT0_full)
 
         # --- Occulted kT0 for ALL epochs at once ---
-        # get_rT_occ returns (N, nt*nk), flattened epoch-major so the
-        # sparse dot below stays a plain 2-D operation (matching
-        # get_kT0's own, unmodified 2-D dot exactly).
+        # get_rT_occ returns (N, nt*nk) where N = (ydeg+udeg+1)**2 -- the
+        # *augmented* degree, not Ny. self._A1Big is square at N (verified
+        # empirically: A1Big.shape == (N, N)), so the dot below stays at
+        # N rows -- it is NOT a reduction to Ny. get_kT0's own (unmodified)
+        # single-epoch code path confirms this: it normalizes at N rows
+        # and only reduces to Ny later, when L is applied. self.Ny must
+        # not appear here until after that L step.
+        N = (self.ydeg + self.udeg + 1) ** 2
         rT_occ_all = self.get_rT_occ(x, xo_rot, yo_rot, ro)  # (N, nt*nk)
-        kT0_occ_flat = ts.dot(ts.transpose(self._A1Big), rT_occ_all)  # (Ny, nt*nk)
-        kT0_occ_all = tt.reshape(kT0_occ_flat, (self.Ny, self.nt, self.nk))
+        kT0_occ_flat = ts.dot(ts.transpose(self._A1Big), rT_occ_all)  # (N, nt*nk)
+        kT0_occ_all = tt.reshape(kT0_occ_flat, (N, self.nt, self.nk))
 
         # Per-epoch normalization -- mirrors get_kT0's own normalization
         # (sum over kernel taps to preserve the unit baseline), but
         # computed separately for EACH epoch (summing only over the nk
         # axis) rather than one value combined across all epochs, which
-        # calling get_kT0 directly on the flattened (Ny, nt*nk) tensor
+        # calling get_kT0 directly on the flattened (N, nt*nk) tensor
         # would silently get wrong. Must happen BEFORE limb-darkening is
         # applied below, matching get_kT0-then-L ordering in the
         # original per-epoch code (L is not diagonal, so normalizing
@@ -2177,13 +2182,17 @@ class OpsDoppler(OpsYlm):
         kT0_occ_all = kT0_occ_all / tt.reshape(norm, (1, self.nt, 1))
 
         if self.udeg > 0:
+            # L reduces N -> Ny here (L.shape == (N, Ny), so L^T is
+            # (Ny, N)) -- this is the only place Ny rows appear.
             kT0_occ_flat = tt.reshape(
-                kT0_occ_all, (self.Ny, self.nt * self.nk)
+                kT0_occ_all, (N, self.nt * self.nk)
             )
             kT0_occ_flat = tt.dot(tt.transpose(L), kT0_occ_flat)
             kT0_occ_all = tt.reshape(
                 kT0_occ_flat, (self.Ny, self.nt, self.nk)
             )
+        # else: N == Ny already (deg == ydeg when udeg == 0), so
+        # kT0_occ_all is already (Ny, nt, nk).
 
         # On-disk mask for every epoch at once (purely elementwise over
         # xo, yo -- never depended on the per-epoch loop to begin with).
