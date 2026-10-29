@@ -1146,7 +1146,16 @@ class System(object):
         # is needed (e.g., fitting porb/ecc alongside veq), this
         # disconnection will need to be made conditional.
         pri_r = self._primary._r
-        _dg = theano.gradient.disconnected_grad
+        if self._lazy:
+            _dg = theano.gradient.disconnected_grad
+            _gt = theano.tensor.gt
+            _switch = theano.tensor.switch
+        else:
+            # greedy mode: x_abs etc. are numpy arrays, there is no graph to disconnect
+            _dg = lambda x: x
+            _gt = np.greater
+            _switch = np.where
+        _ones_like = lambda x: np.ones_like(x) if not self._lazy else theano.tensor.ones_like(x)
         if len(self._secondaries) == 1:
             sec = self._secondaries[0]
             xo = _dg((x_abs[1] - x_abs[0]) / pri_r)
@@ -1156,9 +1165,9 @@ class System(object):
             # Only apply occultation when planet is in front (zo > 0).
             # When behind the star, move the occultor far off-disk so
             # get_kT_occ falls back to the full-disk kernel.
-            in_front = theano.tensor.gt(zo, 0.0)
-            xo = theano.tensor.switch(in_front, xo, theano.tensor.ones_like(xo) * 999.0)
-            yo = theano.tensor.switch(in_front, yo, theano.tensor.ones_like(yo) * 999.0)
+            in_front = _gt(zo, 0.0)
+            xo = _switch(in_front, xo, _ones_like(xo) * 999.0)
+            yo = _switch(in_front, yo, _ones_like(yo) * 999.0)
             return doppler_map.flux(
                 theta=theta,
                 normalize=normalize,
@@ -1185,9 +1194,9 @@ class System(object):
             yo_i = _dg((y_abs[i + 1] - y_abs[0]) / pri_r)
             zo_i = _dg((z_abs[i + 1] - z_abs[0]) / pri_r)
             ro_i = sec._r / pri_r
-            in_front_i = theano.tensor.gt(zo_i, 0.0)
-            xo_i = theano.tensor.switch(in_front_i, xo_i, theano.tensor.ones_like(xo_i) * 999.0)
-            yo_i = theano.tensor.switch(in_front_i, yo_i, theano.tensor.ones_like(yo_i) * 999.0)
+            in_front_i = _gt(zo_i, 0.0)
+            xo_i = _switch(in_front_i, xo_i, _ones_like(xo_i) * 999.0)
+            yo_i = _switch(in_front_i, yo_i, _ones_like(yo_i) * 999.0)
             flux_occ_i = doppler_map.flux(
                 theta=theta,
                 normalize=False,
