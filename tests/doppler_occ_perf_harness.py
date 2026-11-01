@@ -20,7 +20,7 @@ rv_grid = arange(-100, 100.5, 0.5) (401 points), interpolate=True.
 Usage:
     python tests/doppler_occ_perf_harness.py [--nt N] [--ydeg N] [--skip-grad]
         [--theano-mode {fast_compile,fast_run,fast_run_no_fusion}]
-        [--timeout SECONDS]
+        [--timeout SECONDS] [--free-orbit {none,b,full}] [--repeats N]
 
 Iterate at small --nt (e.g. 4) for fast turnaround; confirm at the real
 scale (--nt 31, the ccf_model2025.py default) for final numbers. Run this
@@ -47,6 +47,19 @@ this machine/architecture, or was it emulation-specific?):
                        from git history commit 0231d73) -- keeps most
                        fast_run optimizations but skips the fusion pass
                        specifically implicated in the original failure.
+
+--free-orbit LEVEL adds a second gradient stage with the orbital parameters
+free (System(..., orbit_grad=True), see starry/kepler.py), to measure what
+lifting the planet-position cut costs in graph size, compile time and
+evaluation time against the veq-only gradient above:
+  none (default) -- skip it.
+  b    -- gradient w.r.t. veq and the planet's inclination (the impact
+          parameter b enters only through the inclination).
+  full -- veq, inclination, period, t0, planet radius and stellar mass.
+It reports the number of apply nodes of the compiled gradient function, the
+compile time, the mean time of --repeats value+gradient evaluations and the
+peak resident memory. A reasonable acceptance gate: no C-compilation error,
+and evaluation time within ~3x of the veq-only gradient.
 
 --timeout SECONDS applies a per-stage wall-clock limit (via SIGALRM, so
 Unix/macOS only) so a runaway fast_run compile attempt can't hang
@@ -93,7 +106,32 @@ def parse_args():
         help="Per-stage wall-clock timeout in seconds (SIGALRM-based, Unix/macOS "
              "only). Recommended whenever --theano-mode is not fast_compile.",
     )
+    p.add_argument(
+        "--free-orbit", choices=("none", "b", "full"), default="none",
+        help="Also time a gradient with the orbital parameters free (orbit_grad=True). "
+             "See the module docstring.",
+    )
+    p.add_argument(
+        "--repeats", type=int, default=5,
+        help="Number of repeated evaluations used for the per-call timings (default: 5)",
+    )
     return p.parse_args()
+
+
+def _peak_rss_mb():
+    import resource
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / 1e6 if sys.platform == "darwin" else rss / 1e3  # bytes on macOS, KB on Linux
+
+
+def _time_calls(fn, args_, repeats):
+    fn(*args_)  # warm
+    t0 = time.perf_counter()
+    for _ in range(repeats):
+        fn(*args_)
+    return (time.perf_counter() - t0) / repeats
 
 
 class StageTimeout(Exception):
@@ -248,6 +286,61 @@ def main():
             grad_val = grad_fn(24000.0)
 
         print(f"  d(loss)/d(veq) = {grad_val}")
+        t_base = _time_calls(grad_fn, (24000.0,), args.repeats)
+        n_base = len(grad_fn.maker.fgraph.apply_nodes)
+        print(f"  veq-only gradient: {t_base * 1e3:.1f} ms per call (mean of {args.repeats}), "
+              f"{n_base} apply nodes, peak RSS {_peak_rss_mb():.0f} MB")
+
+        if args.free_orbit != "none":
+            with timed(
+                f"build gradient graph, orbit free ('{args.free_orbit}', orbit_grad=True)",
+                results, timeout,
+            ):
+                nominal = dict(veq=24000.0, inc=87.14, porb=7.713057, t0=0.0, rp=0.0253 * 1.08, mstar=1.094)
+                free = {"veq": tt.dscalar("veq_f"), "inc": tt.dscalar("inc_f")}
+                if args.free_orbit == "full":
+                    free.update(porb=tt.dscalar("porb_f"), t0=tt.dscalar("t0_f"),
+                                rp=tt.dscalar("rp_f"), mstar=tt.dscalar("mstar_f"))
+                par = {k: free.get(k, nominal[k]) for k in nominal}
+
+                starmap3 = starry.DopplerMap(
+                    ydeg=args.ydeg, udeg=args.udeg, nt=nt, wav=wav_grid,
+                    interpolate=True, lazy=True,
+                )
+                starmap3.load(spectrum=intr_spec)
+                starmap3.amp = tt.as_tensor_variable(1.0)
+                starmap3.veq = par["veq"]
+                starmap3.obl = 0.0
+                starmap3.inc = 90.0
+                star3 = starry.Primary(
+                    starmap3, prot=2.24, r=1.08, m=par["mstar"], t0=par["t0"], theta0=0.0,
+                    length_unit=u.Rsun, mass_unit=u.Msun, time_unit=u.day,
+                )
+                planetmap3 = starry.Map(ydeg=1, amp=0.0, nt=nt, nw=len(wav_grid), lazy=True)
+                planet3 = starry.Secondary(
+                    planetmap3, r=par["rp"], porb=par["porb"], inc=par["inc"],
+                    m=0.0, t0=par["t0"], ecc=0.32, w=23.64034616,
+                    length_unit=u.Rsun, mass_unit=u.Msun, time_unit=u.day,
+                )
+                system3 = starry.System(star3, planet3, orbit_grad=True)
+                loss3 = tt.sum(system3.flux(t=times_all, total=True) ** 2)
+                names3 = list(free)
+                grads3 = theano.grad(loss3, [free[k] for k in names3])
+
+            with timed("compile gradient theano.function (orbit free)", results, timeout):
+                grad_fn3 = theano.function([free[k] for k in names3], grads3)
+
+            with timed("first gradient eval (orbit free)", results, timeout):
+                vals3 = grad_fn3(*[nominal[k] for k in names3])
+
+            for k, v in zip(names3, vals3):
+                print(f"  d(loss)/d({k}) = {float(v):.6e}  finite={bool(np.isfinite(v))}")
+            t_free = _time_calls(grad_fn3, tuple(nominal[k] for k in names3), args.repeats)
+            n_free = len(grad_fn3.maker.fgraph.apply_nodes)
+            print(f"  orbit-free gradient: {t_free * 1e3:.1f} ms per call, {n_free} apply nodes, "
+                  f"peak RSS {_peak_rss_mb():.0f} MB")
+            print(f"  cost relative to the veq-only gradient: time x{t_free / t_base:.2f}, nodes x{n_free / n_base:.2f}")
+            print("  (gate: compiles without error and time <= ~3x)")
 
     total = sum(results.values())
     print(f"\nTotal wall-clock: {total:.2f}s")

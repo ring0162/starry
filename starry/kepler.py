@@ -412,6 +412,15 @@ class System(object):
             be one of the following: ``0`` for a centered Riemann sum
             (equivalent to the "resampling" procedure suggested by Kipping 2010),
             ``1`` for the trapezoid rule, or ``2`` for Simpson’s rule.
+        orbit_grad (bool or str, optional): Only used when the primary is a
+            :py:class:`DopplerMap` in lazy (Theano) mode. By default the
+            planet's position is cut off from the gradient, which keeps the
+            gradient graph small (see :py:meth:`_flux_doppler`). Set
+            ``True`` to let gradients flow from the flux back to the orbital
+            parameters (inclination/impact parameter, period, t0, ...,
+            and the radii), or ``"xy"`` to differentiate with respect to
+            the planet's position only (its radius stays disconnected).
+            Default is False.
     """
 
     def _no_spectral(self):
@@ -429,10 +438,15 @@ class System(object):
         texp=None,
         oversample=7,
         order=0,
+        orbit_grad=False,
     ):
         # Units
         self.time_unit = time_unit
         self._light_delay = bool(light_delay)
+        assert orbit_grad in (False, True, "xy"), (
+            "Parameter `orbit_grad` must be False, True or 'xy'."
+        )
+        self._orbit_grad = orbit_grad
         if texp is None:
             self._texp = 0.0
         else:
@@ -1142,17 +1156,22 @@ class System(object):
         # gradient subgraphs for the exoplanet orbital ops, which avoids
         # C compilation issues and drastically shrinks the gradient graph.
         #
-        # NOTE: If in the future gradient flow through orbital parameters
-        # is needed (e.g., fitting porb/ecc alongside veq), this
-        # disconnection will need to be made conditional.
+        # This cut is now conditional: System(..., orbit_grad=True) lets the
+        # gradient flow through the planet's position (xo, yo) to the
+        # orbital parameters; orbit_grad="xy" does so for the position only
+        # and keeps the radius ratio disconnected. `zo` always stays
+        # disconnected: it only feeds the boolean `zo > 0` test.
         pri_r = self._primary._r
+        og = self._orbit_grad
         if self._lazy:
-            _dg = theano.gradient.disconnected_grad
+            _dg_all = theano.gradient.disconnected_grad
+            _dg = (lambda x: x) if og else _dg_all
             _gt = theano.tensor.gt
             _switch = theano.tensor.switch
         else:
             # greedy mode: x_abs etc. are numpy arrays, there is no graph to disconnect
-            _dg = lambda x: x
+            _dg_all = lambda x: x
+            _dg = _dg_all
             _gt = np.greater
             _switch = np.where
         _ones_like = lambda x: np.ones_like(x) if not self._lazy else theano.tensor.ones_like(x)
@@ -1160,8 +1179,10 @@ class System(object):
             sec = self._secondaries[0]
             xo = _dg((x_abs[1] - x_abs[0]) / pri_r)
             yo = _dg((y_abs[1] - y_abs[0]) / pri_r)
-            zo = _dg((z_abs[1] - z_abs[0]) / pri_r)
+            zo = _dg_all((z_abs[1] - z_abs[0]) / pri_r)
             ro = sec._r / pri_r
+            if og == "xy":
+                ro = _dg_all(ro)
             # Only apply occultation when planet is in front (zo > 0).
             # When behind the star, move the occultor far off-disk so
             # get_kT_occ falls back to the full-disk kernel.
@@ -1192,8 +1213,10 @@ class System(object):
         for i, sec in enumerate(self._secondaries):
             xo_i = _dg((x_abs[i + 1] - x_abs[0]) / pri_r)
             yo_i = _dg((y_abs[i + 1] - y_abs[0]) / pri_r)
-            zo_i = _dg((z_abs[i + 1] - z_abs[0]) / pri_r)
+            zo_i = _dg_all((z_abs[i + 1] - z_abs[0]) / pri_r)
             ro_i = sec._r / pri_r
+            if og == "xy":
+                ro_i = _dg_all(ro_i)
             in_front_i = _gt(zo_i, 0.0)
             xo_i = _switch(in_front_i, xo_i, _ones_like(xo_i) * 999.0)
             yo_i = _switch(in_front_i, yo_i, _ones_like(yo_i) * 999.0)
