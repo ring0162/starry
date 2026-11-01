@@ -47,7 +47,13 @@ EPOCH_SETS = {
 
 # --- parts B-E: a small transiting system around a DopplerMap star --------------------
 SYS_NOMINAL = dict(inc=88.0, porb=5.0, t0=0.0, rp=0.1, mstar=1.0)
-SYS_EPS = dict(inc=1e-5, porb=1e-5, t0=1e-6, rp=1e-6, mstar=1e-6)
+# inc uses a larger step: d(loss)/d(inc) is tiny (~1e-5; the per-epoch normalisation and the near-limb-darkening
+# symmetry of the occultation make the flux weakly sensitive to the impact parameter) so a 1e-5 step is
+# dominated by float64 round-off in the loss (~1e-8 absolute in the difference)
+SYS_EPS = dict(inc=1e-3, porb=1e-5, t0=1e-6, rp=1e-6, mstar=1e-6)
+# gradients below this in both estimates are "zero" (e.g. t0 for an ordinary Map primary, where a common shift of
+# the star's and the planet's t0 changes nothing) and are not compared relatively
+ATOL_ZERO = 1e-7
 # five epochs inside the transit (duration ~0.12 d at porb = 5 d): the planet is in front of
 # the disc and away from ingress/egress
 T_EPOCHS = np.array([-0.04, -0.02, 0.0, 0.02, 0.04])
@@ -69,6 +75,8 @@ def _compare(label, analytic, fd, kink, rows, bad):
     if not finite:
         status = "NONFINITE"
         bad.append(label)
+    elif abs(analytic) < ATOL_ZERO and abs(fd) < ATOL_ZERO:
+        status = "OK (both ~0)"
     elif kink:
         status = "kink (not counted)"
     elif rel < RTOL or abs(analytic - fd) < ATOL:
