@@ -303,6 +303,28 @@ def main():
                                 rp=tt.dscalar("rp_f"), mstar=tt.dscalar("mstar_f"))
                 par = {k: free.get(k, nominal[k]) for k in nominal}
 
+                # Is the planet actually in front of the disc at these epochs? If not (e.g. the eccentric
+                # configuration above places no epoch in transit), every orbital gradient is exactly zero and the
+                # gradient values below say nothing about correctness; the timings are still representative.
+                _star_g = starry.Primary(
+                    starry.Map(ydeg=1, lazy=False), prot=2.24, r=1.08, m=nominal["mstar"], t0=nominal["t0"],
+                    theta0=0.0, length_unit=u.Rsun, mass_unit=u.Msun, time_unit=u.day,
+                )
+                _planet_g = starry.Secondary(
+                    starry.Map(ydeg=1, amp=0.0, lazy=False), r=nominal["rp"], porb=nominal["porb"],
+                    inc=nominal["inc"], m=0.0, t0=nominal["t0"], ecc=0.32, w=23.64034616,
+                    length_unit=u.Rsun, mass_unit=u.Msun, time_unit=u.day,
+                )
+                _x, _y, _z = (np.asarray(v) for v in starry.System(_star_g, _planet_g).position(times_all))
+                _sep = np.hypot(_x[1] - _x[0], _y[1] - _y[0]) / 1.08
+                _front = (_z[1] - _z[0]) > 0
+                _n_in = int(np.sum(_front & (_sep < 1.0 + nominal["rp"] / 1.08)))
+                print(f"  epochs with the planet in front of the disc: {_n_in} of {nt} "
+                      f"(smallest sky separation {_sep.min():.2f} R*, planet in front at {int(_front.sum())})")
+                if _n_in == 0:
+                    print("  WARNING: no epoch is in transit, so every orbital gradient below is exactly 0; use "
+                          "this stage for timing only, and check correctness with tests/doppler_orbit_grad_check.py")
+
                 starmap3 = starry.DopplerMap(
                     ydeg=args.ydeg, udeg=args.udeg, nt=nt, wav=wav_grid,
                     interpolate=True, lazy=True,
