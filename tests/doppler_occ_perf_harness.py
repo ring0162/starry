@@ -330,6 +330,11 @@ def main():
                     interpolate=True, lazy=True,
                 )
                 starmap3.load(spectrum=intr_spec)
+                # limb darkening on: for a uniform disc the flux does not depend on the occultor's y while it lies
+                # inside the limb (the chord length per velocity slice is independent of y), which makes d/d(inc)
+                # exactly zero. The real model has limb darkening.
+                starmap3[1] = 0.4
+                starmap3[2] = 0.2
                 starmap3.amp = tt.as_tensor_variable(1.0)
                 starmap3.veq = par["veq"]
                 starmap3.obl = 0.0
