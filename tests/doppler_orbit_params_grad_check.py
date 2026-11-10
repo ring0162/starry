@@ -53,9 +53,12 @@ PROT = og.PROT
 T_REF = 0.3  # rotation reference time, away from t0 so theta0 depends on t0 as in the model
 ECC_MAX = 1.0 - 1e-6
 
-R_SUN_CM = 6.957e10
-M_SUN_G = 1.98841e33
-G_GRAV = 2.9591220828559115e-04  # Rsun^3 / Msun / day^2 (starry's constant, to ~1e-9)
+from astropy import constants as _const, units as _u
+
+# Rsun^3 / Msun / day^2: the same constant starry uses (~2942)
+G_GRAV = float(_const.G.to(_u.Rsun ** 3 / _u.Msun / _u.day ** 2).value)
+R_SUN_CM = float(_u.Rsun.to("cm"))
+M_SUN_G = float(_const.M_sun.to("g").value)
 
 # nominal orbits: (label, dict). rho_star in g/cm^3 gives ~1 Msun at r_star = 1 Rsun
 ORBITS = {
