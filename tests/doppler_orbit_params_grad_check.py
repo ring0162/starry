@@ -22,7 +22,8 @@ Parts (select with the command line, default all):
      to sum(flux^2); every gradient against finite differences of the same compiled function (so this tests that
      the gradient is the derivative of the forward function, not the forward function itself).
   I. composite in the model's eccentricity parametrisation: ecs1 = sqrt(e) cos w, ecs2 = sqrt(e) sin w.
-  J. controls and robustness: orbit_grad=False (gradients of ecc, w, ror, rho_star must be exactly 0),
+  J. controls and robustness: orbit_grad=False (gradients of ecc, omega, rho_star, b, porb must be exactly 0;
+     the ror gradient stays connected and equal to the orbit_grad=True one),
      orbit_grad="xy" (ror gradient exactly 0, others as in H), and a sweep of eccentricities and
      arguments of periastron checking that every gradient is finite.
 
@@ -68,7 +69,7 @@ ORBITS = {
 }
 # finite-difference steps (absolute); inc-like sensitivities are tiny, hence the generous steps for b
 STEPS = dict(rho=1e-5, rstar=1e-6, ror=1e-6, ecc=1e-6, omega=1e-5, b=2e-4, porb=1e-5, t0=1e-6,
-             ecs1=1e-6, ecs2=1e-6, w=1e-4, rp=1e-6, mstar=1e-6)
+             ecs1=1e-5, ecs2=1e-5, w=1e-4, rp=1e-6, mstar=1e-6)
 
 
 def mstar_np(rho, rstar):
@@ -291,15 +292,25 @@ def part_j():
     rows, bad = [], []
     o = ORBITS["e=0.32 w=23.6 (TIC455-like)"]
 
-    # orbit_grad=False: the planet's track is disconnected from every orbit parameter that only acts through it
+    # orbit_grad=False: the planet's POSITION is disconnected from every orbit parameter. The radius ratio is not:
+    # System only cuts ro = r_planet / r_star for orbit_grad="xy", so d/dror must stay non-zero and equal the
+    # orbit_grad=True value.
     c_off = Composite(ecs=False, orbit_grad=False)
+    c_on0 = Composite(ecs=False, orbit_grad=True)
     _, g = c_off(c_off.point(o))
-    for n in ("ror", "ecc", "omega", "rho", "b", "porb"):
+    _, g_on = c_on0(c_on0.point(o))
+    for n in ("ecc", "omega", "rho", "b", "porb"):
         v = g[c_off.names.index(n)]
         ok = v == 0.0
         rows.append((f"orbit_grad=False d/d{n}", v, 0.0, abs(v), "OK" if ok else "MISMATCH"))
         if not ok:
             bad.append(f"off:{n}")
+    i_ror = c_off.names.index("ror")
+    rel = abs(g[i_ror] - g_on[i_ror]) / max(abs(g_on[i_ror]), 1e-30)
+    ok = np.isfinite(g[i_ror]) and g[i_ror] != 0.0 and rel < 1e-6
+    rows.append(("orbit_grad=False d/dror (== True)", g[i_ror], g_on[i_ror], rel, "OK (still connected)" if ok else "MISMATCH"))
+    if not ok:
+        bad.append("off:ror")
     for n in ("rstar", "t0"):  # informational: r_star / t0 also act through the star's own rotation phase and scale
         rows.append((f"orbit_grad=False d/d{n} (info)", g[c_off.names.index(n)], float("nan"), float("nan"), "info"))
 
