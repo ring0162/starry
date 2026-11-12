@@ -55,6 +55,17 @@ __all__ = [
 ]
 
 
+
+def _occ_antialias():
+    """Whether DopplerMap occultations average the occultor's chord over each
+    kernel tap (default) instead of point-sampling it. Set the environment
+    variable STARRY_DOPPLER_OCC_ANTIALIAS=0 before building a map to get the
+    point-sampled kernel (for comparisons)."""
+    import os
+
+    return os.environ.get("STARRY_DOPPLER_OCC_ANTIALIAS", "1") != "0"
+
+
 class OpsYlm(object):
     """Class housing Theano operations for spherical harmonics maps."""
 
@@ -1916,13 +1927,46 @@ class OpsDoppler(OpsYlm):
         r2_2d = tt.shape_padleft(r2)  # (1, nk)
 
         # Half-chord of the occultor at each (epoch, x-slice).
-        chi_sq = tt.maximum(ro ** 2 - (x2 - xo2) ** 2, tt.zeros((nt, nk)))
-        chi = tt.maximum(chi_sq, tt.zeros((nt, nk)) + 1e-100) ** 0.5
-        chi = tt.switch(tt.gt(chi_sq, 0), chi, tt.zeros_like(chi))
+        if _occ_antialias():
+            # Anti-aliased: the half-chord AVERAGED over the width of each
+            # kernel tap, instead of its value at the tap's centre.
+            #
+            # The kernel is sampled at discrete x (lines of constant
+            # velocity).  A small occultor spans only a few taps (its
+            # diameter is 2 ro vsini in velocity), so point-sampling its
+            # chord sqrt(ro^2 - (x - xo)^2) makes the blocked flux depend
+            # on where the occultor sits relative to the taps: the model
+            # ripples with a period of one tap as the occultor moves
+            # (error ~ (dx / ro)^1.5), which is first-order visible in
+            # the likelihood and makes it rough in every parameter that
+            # moves the occultor.  The tap average is
+            #   (F(u + dx/2) - F(u - dx/2)) / dx,   u = x - xo,
+            #   F(u) = int_0^u sqrt(ro^2 - t^2) dt
+            #        = ro^2/2 [w sqrt(1 - w^2) + arcsin(w)],  w = u / ro
+            # (with u clipped to [-ro, ro]), so the sum over taps of the
+            # chord is the occultor's area exactly, wherever it sits, and
+            # the result is continuously differentiable in xo.
+            dx = tt.abs_(x[-1] - x[0]) / (nk - 1.0)
+            _w_eps = np.float64(1e-12)
 
-        # Determine whether each (epoch, x-slice) is inside the
-        # occultor's range.
-        in_range = tt.and_(tt.le(xo2 - ro, x2), tt.le(x2, xo2 + ro))  # (nt, nk)
+            def _chord_integral(u):
+                w = tt.clip(u / ro, -1.0 + _w_eps, 1.0 - _w_eps)
+                return 0.5 * ro ** 2 * (w * (1.0 - w ** 2) ** 0.5 + tt.arcsin(w))
+
+            du = x2 - xo2
+            chi = (_chord_integral(du + 0.5 * dx) - _chord_integral(du - 0.5 * dx)) / dx
+            chi = tt.maximum(chi, tt.zeros((nt, nk)))
+            in_range = tt.and_(
+                tt.le(xo2 - ro - 0.5 * dx, x2), tt.le(x2, xo2 + ro + 0.5 * dx)
+            )  # (nt, nk)
+        else:
+            chi_sq = tt.maximum(ro ** 2 - (x2 - xo2) ** 2, tt.zeros((nt, nk)))
+            chi = tt.maximum(chi_sq, tt.zeros((nt, nk)) + 1e-100) ** 0.5
+            chi = tt.switch(tt.gt(chi_sq, 0), chi, tt.zeros_like(chi))
+
+            # Determine whether each (epoch, x-slice) is inside the
+            # occultor's range.
+            in_range = tt.and_(tt.le(xo2 - ro, x2), tt.le(x2, xo2 + ro))  # (nt, nk)
 
         # Upper and lower integration limits, clipped to the stellar
         # disk boundary at y = +/- r(x).
