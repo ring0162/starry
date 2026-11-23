@@ -2070,20 +2070,23 @@ class OpsDoppler(OpsYlm):
             # STARRY_DOPPLER_OCC_LIMB_SMOOTH=0 restores the hard clip.
             d_u = tt.clip(
                 dx * (1.0 + x2 ** 2 / tt.maximum(r2_2d, 1e-30)) ** 0.5 / r_safe,
-                1e-9,
+                1e-3,
                 0.5,
-            )  # (1, nk)
+            )  # (1, nk); >= dx in practice, the floor only guards round-off below
 
             def _relu_tent(z):
-                zc = tt.clip(z, -d_u, d_u)
-                inner = tt.switch(
-                    tt.lt(zc, 0.0),
-                    (zc + d_u) ** 3 / (6.0 * d_u ** 2),
-                    zc + (d_u - zc) ** 3 / (6.0 * d_u ** 2),
-                )
-                return tt.switch(
-                    tt.ge(z, d_u), z, tt.switch(tt.le(z, -d_u), tt.zeros_like(z), inner)
-                )
+                # E[relu(z + t)], t ~ tent(d_u): the cubic spline
+                #   [relu(z + d)^3 - 2 relu(z)^3 + relu(z - d)^3] / (6 d^2)
+                # (0 for z <= -d, z for z >= d), written without switches so
+                # that Theano compiles it and its gradient quickly (nested
+                # switches with tensor-valued clip bounds made the gradient
+                # compile hang).  Round-off ~ eps z^3 / d^2, negligible for
+                # d >= 1e-3 and |z| <= 3.
+                def c3(v):
+                    v = tt.maximum(v, 0.0)
+                    return v * v * v
+
+                return (c3(z + d_u) - 2.0 * c3(z) + c3(z - d_u)) / (6.0 * d_u * d_u)
 
             def _smooth_clip(a):
                 # beyond +-(1 + d_u) (d_u <= 0.5) the result is flat at +-1: clamp
