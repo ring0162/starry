@@ -2347,7 +2347,21 @@ class OpsDoppler(OpsYlm):
         # xo, yo -- never depended on the per-epoch loop to begin with).
         # Distance is rotation-invariant so we can use either frame.
         dist_sq = xo ** 2 + yo ** 2  # (nt,)
-        on_disk = tt.lt(dist_sq, (1.0 + ro) ** 2)  # (nt,)
+        # The anti-aliased chord extends beyond the occultor along x by the
+        # window's half-width (one tap for the tent, half a tap for the box),
+        # so it still overlaps the star for 1 + ro <= dist < 1 + ro + spread.
+        # Switching to the full-disk kernel at dist = 1 + ro would drop that
+        # sliver at once: a jump in the model at first / last contact, felt
+        # by every parameter that moves a (sub-)exposure across contact.
+        # Beyond 1 + ro + spread the occulted and full kernels agree, so the
+        # switch there is continuous.
+        _aa = _occ_antialias()
+        if _aa is None:
+            spread = 0.0
+        else:
+            dx_tap = tt.abs_(x[-1] - x[0]) / (self.nk - 1.0)
+            spread = dx_tap if _aa == "tent" else 0.5 * dx_tap
+        on_disk = tt.lt(dist_sq, (1.0 + ro + spread) ** 2)  # (nt,)
 
         # Select: use the occulted kT0 when the occultor is on-disk,
         # otherwise fall back to the clean full-disk kT0 -- for all

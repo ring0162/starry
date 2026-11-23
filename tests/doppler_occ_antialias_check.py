@@ -54,6 +54,7 @@ RV_HALF = 25.0        # km/s
 
 
 XO_LIMB = 0.955       # occultor overlapping the stellar limb (sqrt(0.955^2 + 0.25^2) ~ 0.99)
+XO_CONTACT = float(np.sqrt((1.0 + RO) ** 2 - YO ** 2))   # occultor crossing first / last contact
 
 
 def _progress(msg):
@@ -101,7 +102,7 @@ def run_one():
         return float(res.max() - res.min())
 
     out = dict(tap=float(tap), taps_across_planet=float(2 * RO / tap))
-    for tag, xc in (("", XO_CENTRE), ("limb_", XO_LIMB)):
+    for tag, xc in (("", XO_CENTRE), ("limb_", XO_LIMB), ("contact_", XO_CONTACT)):
         xo = xc + np.linspace(-1.0, 1.0, NT) * tap
         signal = far - np.asarray(f_flux(xo, yo))        # what the occultor removes, (NT, NW)
         total = signal.sum(axis=1)
@@ -119,8 +120,8 @@ def run_one():
             fd = (-np.asarray(f_flux(xo + h, yo))[:, k] + np.asarray(f_flux(xo - h, yo))[:, k]) / (2 * h)
             mism[frac] = float(np.max(np.abs(fd - g)) / gmax)
         out.update({
-            tag + "ripple_total": ripple(total) / float(total.mean()),
-            tag + "ripple_channel": ripple(y) / float(y.mean()),
+            tag + "ripple_total": ripple(total) / max(float(np.abs(total).max()), 1e-300),
+            tag + "ripple_channel": ripple(y) / max(float(np.abs(y).max()), 1e-300),
             tag + "grad_mismatch_small": mism[0.02], tag + "grad_mismatch_large": mism[0.2],
             tag + "curvature_spike": spike,
         })
@@ -151,20 +152,22 @@ def main():
     print(f"  {'kernel':16s} {'ripple, summed':>13s} {'ripple, core':>13s} {'grad err 0.02 tap':>18s} "
           f"{'grad err 0.2 tap':>17s} {'curvature spike':>16s}")
     for tag, title in (("", f"occultor inside the disc (xo ~ {XO_CENTRE})"),
-                       ("limb_", f"occultor on the stellar limb (xo ~ {XO_LIMB}, ingress / egress)")):
+                       ("limb_", f"occultor on the stellar limb (xo ~ {XO_LIMB}, ingress / egress)"),
+                       ("contact_", f"occultor crossing first / last contact (xo ~ {XO_CONTACT:.3f})")):
         print(title)
         for name, r in results.items():
             print(f"  {name:16s} {r[tag + 'ripple_total']:13.2e} {r[tag + 'ripple_channel']:13.2e} "
                   f"{r[tag + 'grad_mismatch_small']:18.2e} {r[tag + 'grad_mismatch_large']:17.2e} "
                   f"{r[tag + 'curvature_spike']:16.3g}")
-    print("(ripple: fraction of the occultor's signal; grad err: worst |FD - analytic| / max |analytic|; "
+    print("(ripple: fraction of the occultor's largest signal in the slide; grad err: worst |FD - analytic| / max |analytic|; "
           "curvature spike: largest jump of the second difference / its median)")
     rb, rt, rh = results["box"], results["tent"], results["tent, hard limb"]
     checks = {
         "limb: tent gradient matches FD at 0.02 tap (<1e-3)": rt["limb_grad_mismatch_small"] < 1e-3,
         "limb: tent gradient matches FD at 0.2 tap (<3e-2)": rt["limb_grad_mismatch_large"] < 3e-2,
-        "limb: smoothing lowers the curvature spikes (vs hard limb)":
-            rt["limb_curvature_spike"] < 0.5 * rh["limb_curvature_spike"],
+        "limb: tent curvature spikes well below box": rt["limb_curvature_spike"] < 0.2 * rb["limb_curvature_spike"],
+        "contact: tent gradient matches FD at 0.02 tap (<1e-3)": rt["contact_grad_mismatch_small"] < 1e-3,
+        "contact: tent gradient matches FD at 0.2 tap (<3e-2)": rt["contact_grad_mismatch_large"] < 3e-2,
         "tent ripple >5x below point-sampled (summed)": r0["ripple_total"] / max(rt["ripple_total"], 1e-300) > 5,
         "tent ripple >3x below point-sampled (core)": r0["ripple_channel"] / max(rt["ripple_channel"], 1e-300) > 3,
         "tent gradient matches FD at 0.02 tap (<1e-3)": rt["grad_mismatch_small"] < 1e-3,
