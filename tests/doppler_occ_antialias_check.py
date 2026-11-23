@@ -56,53 +56,22 @@ RV_HALF = 25.0        # km/s
 XO_LIMB = 0.955       # occultor overlapping the stellar limb (sqrt(0.955^2 + 0.25^2) ~ 0.99)
 
 
+def _progress(msg):
+    print(f"    [{os.environ.get('STARRY_DOPPLER_OCC_ANTIALIAS', 'tent')}, limb smoothing "
+          f"{os.environ.get('STARRY_DOPPLER_OCC_LIMB_SMOOTH', '1')}] {msg}", file=sys.stderr, flush=True)
+
+
 def run_one():
-    out = {}
-    for tag, xc in (("", XO_CENTRE), ("limb_", XO_LIMB)):
-        out.update({tag + k: v for k, v in _run_at(xc).items()})
-    print("RESULT " + json.dumps(out))
+    """One kernel (set by the environment): build and compile ONCE, then evaluate both occultor positions."""
+    import time
 
-
-def _run_at(xo_centre):
     import starry
-
-    rv = np.linspace(-RV_HALF, RV_HALF, NW)
-    wav = 600.0 * (1 + rv / 299792.458)
-    dm = starry.DopplerMap(ydeg=3, udeg=2, nt=NT, wav=wav, interpolate=True, lazy=False, vsini_max=12000.0)
-    dm[1] = 0.4
-    dm[2] = 0.2
-    dm.veq = VEQ
-    dm.inc = 90.0
-    dm.obl = 0.0
-    wav0 = dm.wav0
-    dm.load(spectrum=1.0 - 0.5 * np.exp(-0.5 * ((wav0 - 600.0) / 0.0086) ** 2))
-
-    # tap spacing in x (stellar radii): one velocity pixel of the internal grid / vsini
-    dv = (rv[1] - rv[0]) * 1000.0
-    tap = dv / VEQ
-    xo = xo_centre + np.linspace(-1.0, 1.0, NT) * tap
-    theta = np.zeros(NT)
-    occ = np.asarray(dm.flux(theta=theta, xo=xo, yo=np.full(NT, YO), ro=RO, normalize=False))
-    far = np.asarray(dm.flux(theta=theta, xo=np.full(NT, 50.0), yo=np.full(NT, 50.0), ro=RO, normalize=False))
-    signal = far - occ                                   # what the occultor removes, (NT, NW)
-
-    def ripple(y):
-        z = np.linspace(-1, 1, len(y))
-        res = y - np.polyval(np.polyfit(z, y, 3), z)
-        return float(res.max() - res.min())
-
-    total = signal.sum(axis=1)
-    k = int(np.argmax(signal.mean(axis=0)))              # channel where the shadow is strongest
-
-    # curvature spikes of the line-core signal in xo (finite-difference second derivative)
-    y = signal[:, k]
-    d2 = np.diff(y, 2)
-    spike = float(np.max(np.abs(np.diff(d2))) / max(np.median(np.abs(d2)), 1e-300))
-
-    # analytic gradient (Theano) vs finite differences, line-core channel, at every xo
     import theano
     import theano.tensor as tt
 
+    t_start = time.time()
+    rv = np.linspace(-RV_HALF, RV_HALF, NW)
+    wav = 600.0 * (1 + rv / 299792.458)
     dl = starry.DopplerMap(ydeg=3, udeg=2, nt=NT, wav=wav, interpolate=True, lazy=True, vsini_max=12000.0)
     dl[1] = 0.4
     dl[2] = 0.2
@@ -111,25 +80,52 @@ def _run_at(xo_centre):
     dl.obl = 0.0
     dl.load(spectrum=1.0 - 0.5 * np.exp(-0.5 * ((dl.wav0 - 600.0) / 0.0086) ** 2))
     xo_t = tt.dvector("xo")
-    fl = dl.flux(theta=np.zeros(NT), xo=xo_t, yo=np.full(NT, YO), ro=RO, normalize=False)
-    ch = -fl[:, k]                                       # the occultor's signal in that channel (+ const)
-    f_val = theano.function([xo_t], ch)
-    f_grad = theano.function([xo_t], theano.grad(tt.sum(ch), xo_t))   # epochs are independent
-    g = np.asarray(f_grad(xo))
-    gmax = float(np.max(np.abs(g)))
-    mism = {}
-    for frac in (0.02, 0.2):
-        h = frac * tap
-        fd = (np.asarray(f_val(xo + h)) - np.asarray(f_val(xo - h))) / (2 * h)
-        mism[frac] = float(np.max(np.abs(fd - g)) / gmax)
+    yo_t = tt.dvector("yo")
+    w_t = tt.dvector("w")                                # weights over wavelength (picks the channel)
+    fl = dl.flux(theta=np.zeros(NT), xo=xo_t, yo=yo_t, ro=RO, normalize=False)    # (NT, NW)
+    _progress("compiling the flux ...")
+    f_flux = theano.function([xo_t, yo_t], fl)
+    _progress(f"compiling the gradient ... ({time.time() - t_start:.0f} s so far)")
+    # d/dxo_t of the weighted channel; epochs are independent, so the gradient of the sum is per epoch
+    f_grad = theano.function([xo_t, yo_t, w_t], theano.grad(-tt.sum(tt.dot(fl, w_t)), xo_t))
+    _progress(f"compiled in {time.time() - t_start:.0f} s; evaluating")
 
-    out = dict(
-        tap=float(tap), taps_across_planet=float(2 * RO / tap),
-        ripple_total=ripple(total) / float(total.mean()),
-        ripple_channel=ripple(signal[:, k]) / float(signal[:, k].mean()),
-        grad_mismatch_small=mism[0.02], grad_mismatch_large=mism[0.2], curvature_spike=spike,
-    )
-    return out
+    dv = (rv[1] - rv[0]) * 1000.0
+    tap = dv / VEQ                                       # tap spacing in x (stellar radii)
+    yo = np.full(NT, YO)
+    far = np.asarray(f_flux(np.full(NT, 50.0), np.full(NT, 50.0)))
+
+    def ripple(y):
+        z = np.linspace(-1, 1, len(y))
+        res = y - np.polyval(np.polyfit(z, y, 3), z)
+        return float(res.max() - res.min())
+
+    out = dict(tap=float(tap), taps_across_planet=float(2 * RO / tap))
+    for tag, xc in (("", XO_CENTRE), ("limb_", XO_LIMB)):
+        xo = xc + np.linspace(-1.0, 1.0, NT) * tap
+        signal = far - np.asarray(f_flux(xo, yo))        # what the occultor removes, (NT, NW)
+        total = signal.sum(axis=1)
+        k = int(np.argmax(signal.mean(axis=0)))          # channel where the shadow is strongest
+        y = signal[:, k]
+        d2 = np.diff(y, 2)
+        spike = float(np.max(np.abs(np.diff(d2))) / max(np.median(np.abs(d2)), 1e-300))
+        w = np.zeros(NW)
+        w[k] = 1.0
+        g = np.asarray(f_grad(xo, yo, w))
+        gmax = float(np.max(np.abs(g)))
+        mism = {}
+        for frac in (0.02, 0.2):
+            h = frac * tap
+            fd = (-np.asarray(f_flux(xo + h, yo))[:, k] + np.asarray(f_flux(xo - h, yo))[:, k]) / (2 * h)
+            mism[frac] = float(np.max(np.abs(fd - g)) / gmax)
+        out.update({
+            tag + "ripple_total": ripple(total) / float(total.mean()),
+            tag + "ripple_channel": ripple(y) / float(y.mean()),
+            tag + "grad_mismatch_small": mism[0.02], tag + "grad_mismatch_large": mism[0.2],
+            tag + "curvature_spike": spike,
+        })
+    _progress(f"done in {time.time() - t_start:.0f} s")
+    print("RESULT " + json.dumps(out))
 
 
 def main():
@@ -140,13 +136,15 @@ def main():
     for flag, limb, name in (("0", "1", "point-sampled"), ("box", "1", "box"),
                              ("tent", "0", "tent, hard limb"), ("tent", "1", "tent")):
         env = dict(os.environ, STARRY_DOPPLER_OCC_ANTIALIAS=flag, STARRY_DOPPLER_OCC_LIMB_SMOOTH=limb)
+        print(f"running the {name} kernel (progress below; the first compile can take several minutes) ...",
+              flush=True)
+        # stdout is captured for the RESULT line; stderr (progress, warnings, errors) goes straight to the terminal
         proc = subprocess.run([sys.executable, os.path.abspath(__file__), "--one"], env=env,
-                              capture_output=True, text=True)
+                              stdout=subprocess.PIPE, text=True)
         line = [l for l in proc.stdout.splitlines() if l.startswith("RESULT ")]
         if not line:
             print(proc.stdout[-2000:])
-            print(proc.stderr[-4000:])
-            raise SystemExit(f"the {name} run failed")
+            raise SystemExit(f"the {name} run failed (see the messages above)")
         results[name] = json.loads(line[-1][7:])
     r0 = results["point-sampled"]
     print(f"occultor radius {RO} R*, tap spacing {r0['tap']:.4f} R*: {r0['taps_across_planet']:.1f} taps across the planet")
