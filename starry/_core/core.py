@@ -2074,29 +2074,12 @@ class OpsDoppler(OpsYlm):
                 0.5,
             )  # (1, nk); >= dx in practice, the floor only guards round-off below
 
-            def _relu_tent(z):
-                # E[relu(z + t)], t ~ tent(d_u): the cubic spline
-                #   [relu(z + d)^3 - 2 relu(z)^3 + relu(z - d)^3] / (6 d^2)
-                # (0 for z <= -d, z for z >= d), written without switches so
-                # that Theano compiles it and its gradient quickly (nested
-                # switches with tensor-valued clip bounds made the gradient
-                # compile hang).  Round-off ~ eps z^3 / d^2, negligible for
-                # d >= 1e-3 and |z| <= 3.
-                def c3(v):
-                    v = tt.maximum(v, 0.0)
-                    return v * v * v
+            # the smoothed clip is a self-contained op (NumPy, analytic gradient):
+            # as an expression graph, Theano's optimiser hung compiling its gradient
+            from .ops.smoothclip import smooth_clip as _smooth_clip
 
-                return (c3(z + d_u) - 2.0 * c3(z) + c3(z - d_u)) / (6.0 * d_u * d_u)
-
-            def _smooth_clip(a):
-                # beyond +-(1 + d_u) (d_u <= 0.5) the result is flat at +-1: clamp
-                # first so a huge a (r -> 0 at the limb taps) cannot lose the
-                # 1 in a - (a - 1) to round-off
-                a = tt.clip(a, -2.0, 2.0)
-                return a - _relu_tent(a - 1.0) + _relu_tent(-1.0 - a)
-
-            ul = tt.switch(in_range, _smooth_clip((yo2 + chi) / r_safe), tt.zeros((nt, nk)))
-            ll = tt.switch(in_range, _smooth_clip((yo2 - chi) / r_safe), tt.zeros((nt, nk)))
+            ul = tt.switch(in_range, _smooth_clip((yo2 + chi) / r_safe, d_u[0]), tt.zeros((nt, nk)))
+            ll = tt.switch(in_range, _smooth_clip((yo2 - chi) / r_safe, d_u[0]), tt.zeros((nt, nk)))
         else:
             ul = tt.switch(
                 in_range,
