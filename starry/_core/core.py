@@ -57,13 +57,32 @@ __all__ = [
 
 
 def _occ_antialias():
-    """Whether DopplerMap occultations average the occultor's chord over each
-    kernel tap (default) instead of point-sampling it. Set the environment
-    variable STARRY_DOPPLER_OCC_ANTIALIAS=0 before building a map to get the
-    point-sampled kernel (for comparisons)."""
+    """How DopplerMap occultations sample the occultor's chord on the kernel
+    taps, from the environment variable STARRY_DOPPLER_OCC_ANTIALIAS (read
+    when a map is built):
+
+      "tent" (default; also "1"): the chord averaged over each tap with a
+          triangular window of half-width one tap -- the model is twice
+          continuously differentiable in the occultor's position;
+      "box": the chord averaged over each tap's width -- continuous
+          gradient, but with square-root cusps whenever a tap edge crosses
+          the edge of the occultor's chord;
+      "0" (or "off", "none", "point"): point-sampled at the tap centres.
+
+    Returns "tent", "box" or None."""
     import os
 
-    return os.environ.get("STARRY_DOPPLER_OCC_ANTIALIAS", "1") != "0"
+    val = os.environ.get("STARRY_DOPPLER_OCC_ANTIALIAS", "tent").strip().lower()
+    if val in ("0", "off", "none", "point", "false"):
+        return None
+    if val == "box":
+        return "box"
+    if val in ("1", "tent", "on", "true", ""):
+        return "tent"
+    raise ValueError(
+        "STARRY_DOPPLER_OCC_ANTIALIAS must be 'tent' (default), 'box' or '0', "
+        "got {!r}".format(val)
+    )
 
 
 class OpsYlm(object):
@@ -1927,37 +1946,83 @@ class OpsDoppler(OpsYlm):
         r2_2d = tt.shape_padleft(r2)  # (1, nk)
 
         # Half-chord of the occultor at each (epoch, x-slice).
-        if _occ_antialias():
-            # Anti-aliased: the half-chord AVERAGED over the width of each
+        _aa = _occ_antialias()
+        if _aa is not None:
+            # Anti-aliased: the half-chord AVERAGED over a window around each
             # kernel tap, instead of its value at the tap's centre.
             #
             # The kernel is sampled at discrete x (lines of constant
             # velocity).  A small occultor spans only a few taps (its
             # diameter is 2 ro vsini in velocity), so point-sampling its
-            # chord sqrt(ro^2 - (x - xo)^2) makes the blocked flux depend
-            # on where the occultor sits relative to the taps: the model
-            # ripples with a period of one tap as the occultor moves
-            # (error ~ (dx / ro)^1.5), which is first-order visible in
+            # chord c(u) = sqrt(ro^2 - u^2), u = x - xo, makes the blocked
+            # flux depend on where the occultor sits relative to the taps:
+            # the model ripples with a period of one tap as the occultor
+            # moves (error ~ (dx / ro)^1.5), which is first-order visible in
             # the likelihood and makes it rough in every parameter that
-            # moves the occultor.  The tap average is
-            #   (F(u + dx/2) - F(u - dx/2)) / dx,   u = x - xo,
-            #   F(u) = int_0^u sqrt(ro^2 - t^2) dt
-            #        = ro^2/2 [w sqrt(1 - w^2) + arcsin(w)],  w = u / ro
-            # (with u clipped to [-ro, ro]), so the sum over taps of the
-            # chord is the occultor's area exactly, wherever it sits, and
-            # the result is continuously differentiable in xo.
+            # moves the occultor.  With
+            #   F(u) = int_0^u c(t) dt
+            #        = ro^2/2 [w sqrt(1 - w^2) + arcsin(w)],            w = u/ro
+            #   G(u) = int_0^u F(t) dt
+            #        = ro^3/2 [w arcsin(w) + sqrt(1 - w^2)
+            #                  - (1 - w^2)^(3/2) / 3] + const          (|w| <= 1)
+            # (both extended beyond |u| = ro, where c = 0: F constant, G
+            # linear), the window averages are
+            #   box  (width dx):           (F(u + dx/2) - F(u - dx/2)) / dx
+            #   tent (half-width dx):      (G(u + dx) - 2 G(u) + G(u - dx)) / dx^2
+            # Both windows sum to one over the taps, so the sum over taps of
+            # the chord is the occultor's area exactly, wherever it sits.
+            # The box average has a continuous derivative in xo, but its
+            # second derivative, (c(u + dx/2) - c(u - dx/2)) / dx, involves
+            # c'(u) ~ 1/sqrt(ro - |u|): the gradient has square-root cusps
+            # every time a tap edge crosses the chord's edge, which
+            # derails gradient-based optimisers and HMC.  The tent average
+            # is twice continuously differentiable (its second derivative
+            # is a second difference of the continuous c), at the cost of
+            # smoothing the shadow over two taps instead of one.
             dx = tt.abs_(x[-1] - x[0]) / (nk - 1.0)
             _w_eps = np.float64(1e-12)
-
-            def _chord_integral(u):
-                w = tt.clip(u / ro, -1.0 + _w_eps, 1.0 - _w_eps)
-                return 0.5 * ro ** 2 * (w * (1.0 - w ** 2) ** 0.5 + tt.arcsin(w))
-
             du = x2 - xo2
-            chi = (_chord_integral(du + 0.5 * dx) - _chord_integral(du - 0.5 * dx)) / dx
+
+            if _aa == "box":
+
+                def _chord_integral(u):
+                    w = tt.clip(u / ro, -1.0 + _w_eps, 1.0 - _w_eps)
+                    return 0.5 * ro ** 2 * (w * (1.0 - w ** 2) ** 0.5 + tt.arcsin(w))
+
+                chi = (
+                    _chord_integral(du + 0.5 * dx) - _chord_integral(du - 0.5 * dx)
+                ) / dx
+                half = 0.5 * dx
+            else:
+
+                def _F_in(w):
+                    return 0.5 * ro ** 2 * (w * (1.0 - w ** 2) ** 0.5 + tt.arcsin(w))
+
+                def _G_in(w):
+                    q = 1.0 - w ** 2
+                    return 0.5 * ro ** 3 * (
+                        w * tt.arcsin(w) + q ** 0.5 - q ** 1.5 / 3.0
+                    )
+
+                def _chord_double_integral(u):
+                    # G inside the occultor; continued linearly (slope F) beyond
+                    # its edge.  w is clipped strictly inside (-1, 1) so that no
+                    # term's gradient is evaluated at the arcsin / sqrt
+                    # singularities (each term's derivative is infinite there
+                    # even though their sum is finite).
+                    wc = tt.clip(u / ro, -1.0 + _w_eps, 1.0 - _w_eps)
+                    return _G_in(wc) + _F_in(wc) * (u - ro * wc)
+
+                chi = (
+                    _chord_double_integral(du + dx)
+                    - 2.0 * _chord_double_integral(du)
+                    + _chord_double_integral(du - dx)
+                ) / dx ** 2
+                half = dx
+
             chi = tt.maximum(chi, tt.zeros((nt, nk)))
             in_range = tt.and_(
-                tt.le(xo2 - ro - 0.5 * dx, x2), tt.le(x2, xo2 + ro + 0.5 * dx)
+                tt.le(xo2 - ro - half, x2), tt.le(x2, xo2 + ro + half)
             )  # (nt, nk)
         else:
             chi_sq = tt.maximum(ro ** 2 - (x2 - xo2) ** 2, tt.zeros((nt, nk)))

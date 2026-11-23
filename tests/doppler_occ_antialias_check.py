@@ -1,27 +1,36 @@
 """
-Does the DopplerMap occultation model vary smoothly as the occultor moves across the velocity grid?
+Does the DopplerMap occultation model vary smoothly as the occultor moves across the velocity grid -- in value
+AND in gradient?
 
 The occultation kernel is sampled at discrete lines of constant velocity ("taps"). With the occultor's chord
 point-sampled at the tap centres, the flux it blocks depends on where it sits relative to the taps, so the model
-ripples with a period of one tap as the occultor moves; for a planet only a few taps wide the ripple is a
-sizeable fraction of the planet's signal, and the likelihood becomes rough in every parameter that moves the
-planet (obliquity, b, t0, period, eccentricity). `starry/_core/core.py::get_rT_occ` now averages the chord over
-each tap (STARRY_DOPPLER_OCC_ANTIALIAS, default on).
+ripples with a period of one tap as the occultor moves, and the likelihood becomes rough in every parameter that
+moves the planet (obliquity, b, t0, period, eccentricity). `starry/_core/core.py::get_rT_occ` therefore averages
+the chord over a window around each tap (STARRY_DOPPLER_OCC_ANTIALIAS):
 
-This script slides an occultor across two taps in fine steps at fixed y, for the point-sampled and the
-anti-aliased kernel (each in its own process), and reports
+  "0"    point-sampled (no anti-aliasing)
+  "box"  average over each tap's width: smooth values, but the gradient has square-root cusps whenever a tap
+         edge crosses the chord's edge (they stall optimisers and hurt HMC)
+  "tent" (default) triangular window of half-width one tap: twice continuously differentiable
 
-  * the ripple: scatter of the wavelength-summed flux about a smooth (cubic) trend in xo, relative to the
-    occultor's total signal (unocculted minus occulted flux);
-  * the same for a single wavelength channel near the line core (where the shadow lives).
+This script slides an occultor across two taps in fine steps at fixed y, for each kernel (each in its own
+process), and reports
 
-Expected: a ripple of a few per cent of the signal for the point-sampled kernel, and at least ~10x less for
-the anti-aliased one.
+  * ripple: scatter of the occultor's signal about a smooth (cubic) trend in xo, relative to the signal
+    (wavelength-summed, and in the line-core channel);
+  * gradient check: the analytic d(signal)/d(xo) (Theano) against central finite differences with steps of
+    0.02 and 0.2 taps -- the larger step straddles tap edges -- as the worst mismatch relative to the largest
+    gradient; a cusp shows up as a large mismatch at the larger step only;
+  * curvature spikes: the largest jump of the finite-difference second derivative between neighbouring xo,
+    relative to its typical size.
+
+Expected: point-sampled -- ripple of a few per cent; box -- ripple >~10x smaller, but gradient mismatch and
+curvature spikes at tap crossings; tent -- ripple as small as box and a gradient that matches at both steps.
 
 Usage:
     python tests/doppler_occ_antialias_check.py
 (then also run `python tests/doppler_orbit_grad_check.py` and `python tests/doppler_orbit_params_grad_check.py`
- to confirm the gradients of the anti-aliased kernel).
+ to confirm the gradients through the orbit).
 """
 
 import json
@@ -31,7 +40,7 @@ import sys
 
 import numpy as np
 
-NT = 61
+NT = 241
 RO = 0.06
 YO = 0.25
 XO_CENTRE = 0.30
@@ -70,10 +79,41 @@ def run_one():
 
     total = signal.sum(axis=1)
     k = int(np.argmax(signal.mean(axis=0)))              # channel where the shadow is strongest
+
+    # curvature spikes of the line-core signal in xo (finite-difference second derivative)
+    y = signal[:, k]
+    d2 = np.diff(y, 2)
+    spike = float(np.max(np.abs(np.diff(d2))) / max(np.median(np.abs(d2)), 1e-300))
+
+    # analytic gradient (Theano) vs finite differences, line-core channel, at every xo
+    import theano
+    import theano.tensor as tt
+
+    dl = starry.DopplerMap(ydeg=3, udeg=2, nt=NT, wav=wav, interpolate=True, lazy=True, vsini_max=12000.0)
+    dl[1] = 0.4
+    dl[2] = 0.2
+    dl.veq = VEQ
+    dl.inc = 90.0
+    dl.obl = 0.0
+    dl.load(spectrum=1.0 - 0.5 * np.exp(-0.5 * ((dl.wav0 - 600.0) / 0.0086) ** 2))
+    xo_t = tt.dvector("xo")
+    fl = dl.flux(theta=np.zeros(NT), xo=xo_t, yo=np.full(NT, YO), ro=RO, normalize=False)
+    ch = -fl[:, k]                                       # the occultor's signal in that channel (+ const)
+    f_val = theano.function([xo_t], ch)
+    f_grad = theano.function([xo_t], theano.grad(tt.sum(ch), xo_t))   # epochs are independent
+    g = np.asarray(f_grad(xo))
+    gmax = float(np.max(np.abs(g)))
+    mism = {}
+    for frac in (0.02, 0.2):
+        h = frac * tap
+        fd = (np.asarray(f_val(xo + h)) - np.asarray(f_val(xo - h))) / (2 * h)
+        mism[frac] = float(np.max(np.abs(fd - g)) / gmax)
+
     out = dict(
         tap=float(tap), taps_across_planet=float(2 * RO / tap),
         ripple_total=ripple(total) / float(total.mean()),
         ripple_channel=ripple(signal[:, k]) / float(signal[:, k].mean()),
+        grad_mismatch_small=mism[0.02], grad_mismatch_large=mism[0.2], curvature_spike=spike,
     )
     print("RESULT " + json.dumps(out))
 
@@ -83,7 +123,7 @@ def main():
         run_one()
         return
     results = {}
-    for flag, name in (("0", "point-sampled"), ("1", "anti-aliased")):
+    for flag, name in (("0", "point-sampled"), ("box", "box"), ("tent", "tent")):
         env = dict(os.environ, STARRY_DOPPLER_OCC_ANTIALIAS=flag)
         proc = subprocess.run([sys.executable, os.path.abspath(__file__), "--one"], env=env,
                               capture_output=True, text=True)
@@ -93,16 +133,27 @@ def main():
             print(proc.stderr[-4000:])
             raise SystemExit(f"the {name} run failed")
         results[name] = json.loads(line[-1][7:])
-    r0, r1 = results["point-sampled"], results["anti-aliased"]
+    r0 = results["point-sampled"]
     print(f"occultor radius {RO} R*, tap spacing {r0['tap']:.4f} R*: {r0['taps_across_planet']:.1f} taps across the planet")
-    print(f"{'kernel':16s} {'ripple, summed flux':>22s} {'ripple, line-core channel':>28s}   (fraction of the occultor's signal)")
+    print(f"{'kernel':14s} {'ripple, summed':>15s} {'ripple, core':>13s} {'grad err 0.02 tap':>18s} "
+          f"{'grad err 0.2 tap':>17s} {'curvature spike':>16s}")
     for name, r in results.items():
-        print(f"{name:16s} {r['ripple_total']:22.2e} {r['ripple_channel']:28.2e}")
-    gain_t = r0["ripple_total"] / max(r1["ripple_total"], 1e-300)
-    gain_c = r0["ripple_channel"] / max(r1["ripple_channel"], 1e-300)
-    print(f"reduction: x{gain_t:.0f} (summed flux), x{gain_c:.0f} (line-core channel)")
-    ok = gain_t > 5 and gain_c > 3
-    print("PASS" if ok else "FAIL: the anti-aliased kernel is not clearly smoother")
+        print(f"{name:14s} {r['ripple_total']:15.2e} {r['ripple_channel']:13.2e} {r['grad_mismatch_small']:18.2e} "
+              f"{r['grad_mismatch_large']:17.2e} {r['curvature_spike']:16.3g}")
+    print("(ripple: fraction of the occultor's signal; grad err: worst |FD - analytic| / max |analytic|; "
+          "curvature spike: largest jump of the second difference / its median)")
+    rb, rt = results["box"], results["tent"]
+    checks = {
+        "tent ripple >5x below point-sampled (summed)": r0["ripple_total"] / max(rt["ripple_total"], 1e-300) > 5,
+        "tent ripple >3x below point-sampled (core)": r0["ripple_channel"] / max(rt["ripple_channel"], 1e-300) > 3,
+        "tent gradient matches FD at 0.02 tap (<1e-3)": rt["grad_mismatch_small"] < 1e-3,
+        "tent gradient matches FD at 0.2 tap (<3e-2)": rt["grad_mismatch_large"] < 3e-2,
+        "tent curvature spikes well below box": rt["curvature_spike"] < 0.2 * rb["curvature_spike"],
+    }
+    for k, v in checks.items():
+        print(("  ok   " if v else "  FAIL ") + k)
+    ok = all(checks.values())
+    print("PASS" if ok else "FAIL")
     raise SystemExit(0 if ok else 1)
 
 
