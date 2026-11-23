@@ -56,6 +56,17 @@ __all__ = [
 
 
 
+def _occ_limb_smooth():
+    """Whether the tent-anti-aliased DopplerMap occultation also smooths the
+    clipping of the occultor's chord at the stellar limb (default on; set the
+    environment variable STARRY_DOPPLER_OCC_LIMB_SMOOTH=0 before building a
+    map for the hard clip)."""
+    import os
+
+    return os.environ.get("STARRY_DOPPLER_OCC_LIMB_SMOOTH", "1").strip().lower() not in (
+        "0", "off", "false", "none")
+
+
 def _occ_antialias():
     """How DopplerMap occultations sample the occultor's chord on the kernel
     taps, from the environment variable STARRY_DOPPLER_OCC_ANTIALIAS (read
@@ -2041,16 +2052,59 @@ class OpsDoppler(OpsYlm):
         # poisons the result even though the switch would select the
         # other branch.
         r_safe = tt.maximum(r_2d, tt.ones((1, nk)) * 1e-30)
-        ul = tt.switch(
-            in_range,
-            tt.switch(tt.gt(yo2 + chi, r_2d), tt.ones((nt, nk)), (yo2 + chi) / r_safe),
-            tt.zeros((nt, nk)),
-        )
-        ll = tt.switch(
-            in_range,
-            tt.switch(tt.lt(yo2 - chi, -r_2d), -tt.ones((nt, nk)), (yo2 - chi) / r_safe),
-            tt.zeros((nt, nk)),
-        )
+        if _aa == "tent" and _occ_limb_smooth():
+            # Smooth clipping of the chord's ends at the stellar limb.  In each
+            # kernel column the blocked segment is the occultor's chord
+            # [yo - chi, yo + chi] clipped to the star [-r(x), r(x)].  A hard
+            # clip puts a kink in the blocked flux whenever an end of the
+            # chord crosses the limb in a column (ingress / egress), i.e.
+            # many kinks in every parameter that moves the occultor -- the
+            # same problem the tent average removes along x.  The limb is
+            # not at one y within a tap: across the tap's width it spans
+            # ~ dx sqrt(1 + (dr/dx)^2) (the arc length of the limb in that
+            # column).  The clip is therefore averaged with a triangular
+            # window of that half-width (in units of r):
+            #   min(a, 1) -> a - R(a - 1),  R(z) = E[relu(z + t)], t ~ tent(d),
+            # a cubic spline (C2) that never exceeds the hard clip, so the
+            # clipped chord stays on the star.  Same at -1.
+            # STARRY_DOPPLER_OCC_LIMB_SMOOTH=0 restores the hard clip.
+            d_u = tt.clip(
+                dx * (1.0 + x2 ** 2 / tt.maximum(r2_2d, 1e-30)) ** 0.5 / r_safe,
+                1e-9,
+                0.5,
+            )  # (1, nk)
+
+            def _relu_tent(z):
+                zc = tt.clip(z, -d_u, d_u)
+                inner = tt.switch(
+                    tt.lt(zc, 0.0),
+                    (zc + d_u) ** 3 / (6.0 * d_u ** 2),
+                    zc + (d_u - zc) ** 3 / (6.0 * d_u ** 2),
+                )
+                return tt.switch(
+                    tt.ge(z, d_u), z, tt.switch(tt.le(z, -d_u), tt.zeros_like(z), inner)
+                )
+
+            def _smooth_clip(a):
+                # beyond +-(1 + d_u) (d_u <= 0.5) the result is flat at +-1: clamp
+                # first so a huge a (r -> 0 at the limb taps) cannot lose the
+                # 1 in a - (a - 1) to round-off
+                a = tt.clip(a, -2.0, 2.0)
+                return a - _relu_tent(a - 1.0) + _relu_tent(-1.0 - a)
+
+            ul = tt.switch(in_range, _smooth_clip((yo2 + chi) / r_safe), tt.zeros((nt, nk)))
+            ll = tt.switch(in_range, _smooth_clip((yo2 - chi) / r_safe), tt.zeros((nt, nk)))
+        else:
+            ul = tt.switch(
+                in_range,
+                tt.switch(tt.gt(yo2 + chi, r_2d), tt.ones((nt, nk)), (yo2 + chi) / r_safe),
+                tt.zeros((nt, nk)),
+            )
+            ll = tt.switch(
+                in_range,
+                tt.switch(tt.lt(yo2 - chi, -r_2d), -tt.ones((nt, nk)), (yo2 - chi) / r_safe),
+                tt.zeros((nt, nk)),
+            )
 
         # Hard-clamp ul, ll to (-1+eps, 1-eps).  At exactly ±1, arcsin
         # and (1-u^2)^0.5 have infinite derivatives; Theano evaluates
