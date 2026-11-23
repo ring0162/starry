@@ -167,7 +167,13 @@ def main():
         "limb: tent gradient matches FD at 0.2 tap (<3e-2)": rt["limb_grad_mismatch_large"] < 3e-2,
         "limb: tent curvature spikes well below box": rt["limb_curvature_spike"] < 0.2 * rb["limb_curvature_spike"],
         "contact: tent gradient matches FD at 0.02 tap (<1e-3)": rt["contact_grad_mismatch_small"] < 1e-3,
-        "contact: tent gradient matches FD at 0.2 tap (<3e-2)": rt["contact_grad_mismatch_large"] < 3e-2,
+        # near contact the blocked flux grows like (distance inside)^1.5, smoothed over a tap: smooth but strongly
+        # curved, so a 0.2-tap central difference is off by a few per cent (it shrinks ~h^1.5-h^2 with the
+        # step; a jump or kink would not shrink); the decisive checks are the small step and the curvature
+        "contact: tent FD error shrinks with the step (no jump / kink)":
+            rt["contact_grad_mismatch_large"] > 10 * rt["contact_grad_mismatch_small"],
+        "contact: tent gradient matches FD at 0.2 tap (<6e-2)": rt["contact_grad_mismatch_large"] < 6e-2,
+        "contact: tent curvature spikes small (< 2)": rt["contact_curvature_spike"] < 2.0,
         "tent ripple >5x below point-sampled (summed)": r0["ripple_total"] / max(rt["ripple_total"], 1e-300) > 5,
         "tent ripple >3x below point-sampled (core)": r0["ripple_channel"] / max(rt["ripple_channel"], 1e-300) > 3,
         "tent gradient matches FD at 0.02 tap (<1e-3)": rt["grad_mismatch_small"] < 1e-3,
